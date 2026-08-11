@@ -1,0 +1,36 @@
+{
+  "rules": [
+    {
+      "name": "Camera Agent - {{device_id}} - Facebook violation",
+      "description": "Managed by camera-agent for device '{{device_id}}'. Create a major alarm once when the local temporal rule confirms active Facebook use.",
+      "input": {
+        "type": "message",
+        "thing_ids": ["{{thing_id}}"]
+      },
+      "conditions": [
+        {
+          "field": "rule_violation_event",
+          "comparator": "==",
+          "threshold": 1
+        }
+      ],
+      "actions": [{"type": "alarm", "level": 4}]
+    },
+    {
+      "name": "Camera Agent - {{device_id}} - Camera offline",
+      "description": "Managed by camera-agent for device '{{device_id}}'. Create a minor alarm once when the camera becomes offline.",
+      "input": {
+        "type": "message",
+        "thing_ids": ["{{thing_id}}"]
+      },
+      "conditions": [
+        {
+          "field": "camera_offline_event",
+          "comparator": "==",
+          "threshold": 1
+        }
+      ],
+      "actions": [{"type": "alarm", "level": 3}]
+    }
+  ]
+}

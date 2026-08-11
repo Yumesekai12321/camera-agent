@@ -1,0 +1,12 @@
+numpy>=2.0,<3
+opencv-python>=4.10,<6
+mss>=10,<11
+pillow>=11,<13
+python-dotenv>=1.0,<2
+PyYAML>=6.0,<7
+requests>=2.32,<3
+pytapo>=3.4,<4
+pywin32>=310,<400
+torch>=2.6,<3
+torchvision>=0.21,<1
+ultralytics>=8.3,<9

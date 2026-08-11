@@ -1,0 +1,28 @@
+version: 2
+fleet:
+  preview: true
+devices:
+- device_id: yume-1
+  display_name: Yume 1
+  enabled: true
+  source_type: rtsp
+  source:
+    host: 172.16.7.151
+    port: 554
+    username_env: CAMERA_AGENT_YUME_1_RTSP_USER
+    password_env: CAMERA_AGENT_YUME_1_RTSP_PASS
+    adapter: tapo
+    path: stream1
+  mainflux:
+    thing_name: camera-agent-yume-1
+    thing_key_env: CAMERA_AGENT_YUME_1_MAINFLUX_THING_KEY
+  physical_alarm:
+    enabled: true
+    provider: tapo
+    duration_seconds: 3
+    cooldown_seconds: 30
+  monitor_roi: null
+  process_interval: 1.0
+  rules:
+    template: default
+    overrides: {}

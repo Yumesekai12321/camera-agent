@@ -1,0 +1,15 @@
+path: data/computer/detector
+
+train: train/images
+val: valid/images
+test: test/images
+
+names:
+  0: computer_screen
+
+roboflow:
+  workspace: object-detection-bwxix
+  project: computer-monitor
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/object-detection-bwxix/computer-monitor/dataset/1

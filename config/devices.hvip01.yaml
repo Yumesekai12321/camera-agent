@@ -1,0 +1,24 @@
+version: 2
+
+fleet:
+  preview: true
+
+# Adapter-example runtime. This manifest contains environment-variable names, not secrets.
+devices:
+  - device_id: hvip01
+    display_name: Home Vision HVIP01 via Android
+    enabled: true
+    source_type: adb
+    source:
+      fps: 1.0
+      command_timeout: 6
+      require_landscape: true
+      minimum_frame_std: 2.0
+    mainflux:
+      thing_name: hvip01
+      thing_key_env: HVIP01_MAINFLUX_THING_KEY
+    # Add monitor_roi after opening ONE Home live view and running calibrate_roi.
+    process_interval: 1.5
+    rules:
+      template: default
+      overrides: {}

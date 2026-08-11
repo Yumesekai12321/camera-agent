@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Camera Agent - SenML",
+    "config": {
+      "content_type": "application/senml+json",
+      "write_enabled": true,
+      "rule_enabled": true,
+      "webhook_enabled": false,
+      "transformer": {
+        "data_filters": [],
+        "data_field": "",
+        "time_field": "",
+        "time_format": "",
+        "time_location": ""
+      }
+    },
+    "metadata": {
+      "managed_by": "camera-agent",
+      "provisioning_version": 2
+    }
+  }
+]

@@ -1,0 +1,9 @@
+[facebook_usage]
+enabled = true
+minimum_confidence = 0.6
+trigger_after_seconds = 0.0
+cooldown_seconds = 3.0
+
+[camera_offline]
+enabled = true
+trigger_after_seconds = 0.0
