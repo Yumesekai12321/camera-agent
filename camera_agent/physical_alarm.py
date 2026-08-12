@@ -32,6 +32,7 @@ class TapoSirenAlarm(PhysicalAlarm):
     password: str = field(repr=False)
     duration_seconds: float = 3.0
     cooldown_seconds: float = 30.0
+    audio_id: int = 8196
     clock: Callable[[], float] = time.monotonic
     _last_trigger_at: float | None = field(default=None, init=False, repr=False)
     _in_flight: bool = field(default=False, init=False, repr=False)
@@ -90,15 +91,18 @@ class TapoSirenAlarm(PhysicalAlarm):
                 printWarnInformation=False,
             )
             LOGGER.warning("Tapo physical alarm ON: %s", reason)
-            camera.setSirenStatus(True)
+            # C200 firmware exposes custom-audio playback but not the newer
+            # setSirenStatus/play_alarm methods.  This plays the selected
+            # user-defined sound through the camera speaker.
+            camera.testUsrDefAudio(self.audio_id, True)
             time.sleep(self.duration_seconds)
-            camera.setSirenStatus(False)
+            camera.testUsrDefAudio(self.audio_id, False)
             LOGGER.warning("Tapo physical alarm OFF")
         except Exception as exc:
             LOGGER.error("Tapo physical alarm failed: %s", exc)
             try:
                 if camera is not None:
-                    camera.setSirenStatus(False)
+                    camera.testUsrDefAudio(self.audio_id, False)
             except Exception:
                 pass
         finally:
@@ -117,6 +121,7 @@ def build_tapo_alarm(
     password: str | None,
     duration_seconds: float,
     cooldown_seconds: float,
+    audio_id: int = 8196,
 ) -> PhysicalAlarm:
     if not enabled:
         return NoopPhysicalAlarm()
@@ -130,4 +135,5 @@ def build_tapo_alarm(
         password=password,
         duration_seconds=duration_seconds,
         cooldown_seconds=cooldown_seconds,
+        audio_id=audio_id,
     )

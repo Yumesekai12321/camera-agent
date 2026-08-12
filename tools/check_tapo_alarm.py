@@ -69,11 +69,13 @@ def trigger_tapo_siren(device, *, duration: float) -> None:
         printWarnInformation=False,
     )
     try:
-        camera.setSirenStatus(True)
+        # C200 firmware supports user-defined audio playback, while its
+        # setSirenStatus/play_alarm endpoints may be unavailable.
+        camera.testUsrDefAudio(device.physical_alarm_audio_id, True)
         time.sleep(duration)
     finally:
         try:
-            camera.setSirenStatus(False)
+            camera.testUsrDefAudio(device.physical_alarm_audio_id, False)
         except Exception:
             pass
 

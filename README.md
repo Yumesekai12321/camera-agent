@@ -27,8 +27,8 @@ thể từ chối manual siren control.
   `camera_agent/`.
 - Onboarding, registry transaction, source preflight, provisioning idempotent, rule isolation,
   inference serialization và durable outbox đều có unit test không dùng secret/camera thật.
-- `unittest` PASS 114/114; `compileall` và `agent.py --check-config` đều PASS.
-- Hai entry hiện hữu trong `config/devices.yaml` vẫn enabled và được config-check thành công.
+- `unittest` PASS 120/120; `compileall` và `agent.py --check-config` đều PASS.
+- `config/devices.yaml` hiện có một device enabled: `yume-1`.
 - Không chạy source probe thật, không đăng nhập/provision Mainflux thật và không tạo/xóa remote
   resource trong đợt thay đổi này. Các bước cần phần cứng/account nằm ở phần vận hành bên dưới.
 - Model production vẫn là model ba lớp hiện hữu; thay đổi này không train hay thay model. Chưa
@@ -292,9 +292,10 @@ Local agent giữ temporal confirmation/cooldown; server rules chỉ xử lý
 `rule_violation_event == 1` và `camera_offline_event == 1`. Provisioner phân trang collection,
 reconcile drift, kiểm tra exact assignment và chạy lại không tạo Thing/profile/rule trùng.
 
-Mainflux Alarm là bản ghi/cảnh báo server. Nếu muốn C200 phát còi vật lý, bật `physical_alarm`
-riêng cho device Tapo RTSP. Còi vật lý dùng optional package không chính thức `pytapo`; không
-đặt password trong YAML và không log credential:
+Mainflux Alarm là bản ghi/cảnh báo server. Nếu muốn C200 phát âm thanh vật lý, bật
+`physical_alarm` riêng cho device Tapo RTSP. C200 firmware của device hiện tại không cung cấp
+`setSirenStatus`/`play_alarm`, nên adapter dùng custom audio `testUsrDefAudio` qua optional package
+không chính thức `pytapo`; không đặt password trong YAML và không log credential:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pytapo
@@ -302,9 +303,9 @@ riêng cho device Tapo RTSP. Còi vật lý dùng optional package không chính
 .\.venv\Scripts\python.exe -m tools.check_tapo_alarm --device-id yume-1 --duration 3 --yes
 ```
 
-Lệnh đầu của `check_tapo_alarm` chỉ validate target. Lệnh có `--yes` sẽ làm camera kêu thật.
-Nếu firmware trả lỗi kiểu không hỗ trợ siren/manual alarm, agent vẫn giữ Mainflux Alarm và log lỗi
-physical alarm thay vì dừng runtime.
+Lệnh đầu của `check_tapo_alarm` chỉ validate target. Lệnh có `--yes` sẽ làm camera phát audio thật.
+`physical_alarm.audio_id` là ID custom audio đã có trên camera, mặc định `8196`. Nếu firmware hoặc
+audio ID không hỗ trợ, agent vẫn giữ Mainflux Alarm và log lỗi physical alarm thay vì dừng runtime.
 
 CLI độc lập chỉ reconcile Thing đã tồn tại; nó không tạo Thing mới vì không có safe sink để lưu
 key vừa sinh:
@@ -507,7 +508,7 @@ camera_agent/fleet.py           per-device workers, shared models/lock, pixel-fr
 camera_agent/provisioning.py    Mainflux Thing/profile/per-device-rule reconciliation
 camera_agent/mainflux.py        SenML publisher và retry
 camera_agent/outbox.py          SQLite edge-event queue theo device + destination
-camera_agent/physical_alarm.py  optional Tapo physical siren actuator
+camera_agent/physical_alarm.py  optional Tapo custom-audio alarm actuator
 config/devices.yaml             hai adapter thử nghiệm đã migrate, không chứa secret
 config/devices.example.yaml     catalog source generic v2
 mainflux/*.template.json        shared profile + parameterized per-device rules
@@ -528,5 +529,27 @@ models/ và data/                 tài sản production/training, không bị th
 .\.venv\Scripts\python.exe agent.py --check-config
 ```
 
-Gate cuối của đợt thay đổi này: **114/114 test PASS**, `compileall` PASS và config-check PASS với
-2/2 entry hiện hữu enabled. Các gate này không mở camera và không mutate Mainflux.
+Gate cuối của đợt thay đổi này: **120/120 test PASS**, `compileall` PASS và config-check PASS với
+1/1 entry hiện hữu enabled. Các gate này không mở camera và không mutate Mainflux.
+
+## Monitor Windows và C200 custom audio
+
+Project có executable status-only tại `dist/CameraAgentMonitor.exe`. Monitor tự tìm project root,
+chạy agent bằng `.venv` và truyền manifest bằng đường dẫn tuyệt đối, nên có thể mở bằng
+PowerShell hoặc double-click:
+
+```powershell
+Start-Process .\dist\CameraAgentMonitor.exe
+```
+
+Monitor chỉ hiển thị `State`, `Score`, `Rule` và trạng thái Mainflux; không hiển thị pixel camera.
+Khi state là `FACEBOOK_DETECTED`, local rule gửi `rule_violation_event`, Mainflux tạo Alarm và
+physical alarm gọi custom audio trên C200. Rule Facebook và physical alarm của `yume-1` hiện cùng
+dùng cooldown 3 giây; `audio_id: 8196` phải tồn tại trong Tapo app.
+
+Nếu cần rebuild executable sau khi sửa `tools/monitor.py`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller
+.\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm CameraAgentMonitor.spec
+```

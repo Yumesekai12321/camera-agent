@@ -63,8 +63,8 @@ khai. Không đọc/in `.env` thật khi không cần thiết.
   device.
 - `camera_agent/mainflux.py` + `camera_agent/outbox.py`: SenML publisher, retry và durable event
   outbox.
-- `camera_agent/physical_alarm.py`: actuator tùy chọn để kích còi vật lý Tapo, không nằm trong
-  luồng RTSP/Mainflux telemetry.
+- `camera_agent/physical_alarm.py`: actuator tùy chọn để phát custom audio trên Tapo C200, không
+  nằm trong luồng RTSP/Mainflux telemetry; không giả định `setSirenStatus` có trên mọi firmware.
 - `camera_agent/provisioning.py`: reconcile Thing/profile/per-device rule qua Mainflux API.
 - `camera_agent/application.py`: orchestration một device, preview và evidence opt-in.
 - `camera_agent/fleet.py`: per-device agents, shared models/lock và pixel-free fleet dashboard.
@@ -109,8 +109,8 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 
 ## Bàn giao hiện tại
 
-- `config/devices.yaml` đã migrate sang schema v2 nhưng vẫn giữ hai adapter thử nghiệm hiện tại;
-  không tự ngắt/xóa/re-provision chúng. `config/devices.example.yaml` là catalog nguồn generic.
+- `config/devices.yaml` đã migrate sang schema v2 và hiện có một device enabled là `yume-1`; không
+  tự ngắt/xóa/re-provision Thing hiện tại. `config/devices.example.yaml` là catalog nguồn generic.
 - Onboard thiết bị mới bằng `tools.add_device`; reset hai adapter cũ chỉ được làm theo reset plan
   trong README sau khi người dùng xác nhận và thao tác phần cứng/Mainflux cần thiết.
 - Mainflux cũ có thể còn hai shared legacy rules. Provisioner mới phải dừng khi phát hiện overlap;
@@ -125,6 +125,19 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 - Nếu cần sửa collector/trainer, phải có phạm vi triển khai rõ từ người dùng. Nếu người dùng chỉ
   yêu cầu tài liệu/prompt bàn giao, không sửa Python, YAML runtime, model, dataset, `.env`,
   Mainflux hoặc tests.
+
+## Cập nhật runtime hiện tại
+
+- Tapo C200 của `yume-1` từ chối các method `setSirenStatus` và `play_alarm`, nhưng hỗ trợ
+  `testUsrDefAudio`; physical alarm dùng custom audio ID trong `physical_alarm.audio_id` (hiện là
+  `8196`). Không reverse-engineer thêm giao thức hoặc tự downgrade firmware.
+- `physical_alarm` phải có cooldown không nhỏ hơn duration. Khi cần lặp âm thanh theo event, đồng bộ
+  cooldown actuator với cooldown local rule; monitor chỉ hiển thị cooldown của rule.
+- `tools/monitor.py` phải tìm được project root khi chạy từ source hoặc PyInstaller executable,
+  truyền manifest tuyệt đối và dùng `.venv\Scripts\python.exe` nếu tồn tại. Monitor không được hiển
+  thị pixel camera.
+- Regression gate gần nhất: `120/120` unittest PASS, `compileall` PASS và
+  `agent.py --check-config` PASS với `1/1` device enabled.
 
 ## Tài liệu, bảo mật và vận hành
 

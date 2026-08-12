@@ -7,20 +7,23 @@ devices:
   enabled: true
   source_type: rtsp
   source:
-    host: 172.16.7.151
+    host: 172.16.7.201
     port: 554
-    username_env: CAMERA_AGENT_YUME_1_RTSP_USER
-    password_env: CAMERA_AGENT_YUME_1_RTSP_PASS
+    username_env: CAMERA_AGENT_YUME_1_NEW_RTSP_USER
+    password_env: CAMERA_AGENT_YUME_1_NEW_RTSP_PASS
     adapter: tapo
     path: stream1
   mainflux:
+    thing_key_env: CAMERA_AGENT_YUME_1_NEW_MAINFLUX_THING_KEY
+    group_id: 1ab5e17f-2936-4524-8056-2d4e417eddb0
     thing_name: camera-agent-yume-1
-    thing_key_env: CAMERA_AGENT_YUME_1_MAINFLUX_THING_KEY
+    thing_id: f1a0b8e9-4c7d-444b-83e2-ff484a9ebfdc
   physical_alarm:
     enabled: true
     provider: tapo
     duration_seconds: 3
-    cooldown_seconds: 30
+    cooldown_seconds: 3
+    audio_id: 8196
   monitor_roi: null
   process_interval: 1.0
   rules:
