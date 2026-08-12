@@ -213,6 +213,7 @@ class FleetAgent:
                         password=device.settings.rtsp_password,
                         duration_seconds=device.physical_alarm_duration_seconds,
                         cooldown_seconds=device.physical_alarm_cooldown_seconds,
+                        audio_id=device.physical_alarm_audio_id,
                     ),
                     status_callback=self.board.update,
                     stop_event=self.stop_event,

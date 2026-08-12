@@ -76,7 +76,13 @@ WEBCAM_SOURCE_KEYS = {
     "reconnect_initial",
     "reconnect_max",
 }
-PHYSICAL_ALARM_KEYS = {"enabled", "provider", "duration_seconds", "cooldown_seconds"}
+PHYSICAL_ALARM_KEYS = {
+    "enabled",
+    "provider",
+    "duration_seconds",
+    "cooldown_seconds",
+    "audio_id",
+}
 
 
 @dataclass(frozen=True)
@@ -107,6 +113,7 @@ class DeviceDefinition:
     physical_alarm_provider: str = "none"
     physical_alarm_duration_seconds: float = 3.0
     physical_alarm_cooldown_seconds: float = 30.0
+    physical_alarm_audio_id: int = 8196
     rules_template: str = "default"
     rules_config: RulesConfig | None = None
 
@@ -529,12 +536,15 @@ def _resolve_physical_alarm(
         raise ConfigurationError(f"{context}.provider must be none or tapo")
     duration = _number_value(raw.get("duration_seconds", 3.0), f"{context}.duration_seconds")
     cooldown = _number_value(raw.get("cooldown_seconds", 30.0), f"{context}.cooldown_seconds")
+    audio_id = _integer_value(raw.get("audio_id", 8196), f"{context}.audio_id")
     if duration <= 0:
         raise ConfigurationError(f"{context}.duration_seconds must be greater than zero")
     if cooldown < duration:
         raise ConfigurationError(
             f"{context}.cooldown_seconds must be at least duration_seconds"
         )
+    if audio_id <= 0:
+        raise ConfigurationError(f"{context}.audio_id must be greater than zero")
     if enabled and provider == "none":
         raise ConfigurationError(f"{context}.provider is required when enabled")
     if enabled and provider == "tapo":
@@ -555,6 +565,7 @@ def _resolve_physical_alarm(
         "physical_alarm_provider": provider,
         "physical_alarm_duration_seconds": duration,
         "physical_alarm_cooldown_seconds": cooldown,
+        "physical_alarm_audio_id": audio_id,
     }
 
 

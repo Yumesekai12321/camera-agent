@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 
@@ -70,6 +70,27 @@ class PhysicalAlarmTests(unittest.TestCase):
                 duration_seconds=2,
                 cooldown_seconds=10,
             )
+
+    def test_tapo_alarm_uses_custom_audio_fallback(self):
+        fake_camera = MagicMock()
+        fake_module = MagicMock(Tapo=MagicMock(return_value=fake_camera))
+        alarm = TapoSirenAlarm(
+            host="camera.example.test",
+            username="user",
+            password="secret",
+            duration_seconds=1,
+            cooldown_seconds=2,
+            audio_id=8196,
+        )
+
+        with patch("camera_agent.physical_alarm.importlib.import_module", return_value=fake_module):
+            with patch("camera_agent.physical_alarm.time.sleep"):
+                alarm._run_alarm("test")
+
+        self.assertEqual(
+            fake_camera.testUsrDefAudio.call_args_list,
+            [call(8196, True), call(8196, False)],
+        )
 
     def test_camera_agent_triggers_physical_alarm_on_facebook_rule_event(self):
         settings = replace(

@@ -38,6 +38,7 @@ COMMON_DEVICE_FIELDS = {
     "source_type",
     "source",
     "mainflux",
+    "physical_alarm",
     "monitor_roi",
     "process_interval",
     "rules",

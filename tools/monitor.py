@@ -192,11 +192,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def find_project_root() -> Path:
+    """Find the source checkout when launched from Python or a PyInstaller exe."""
+    configured = os.getenv("CAMERA_AGENT_PROJECT", "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(Path.cwd())
+
+    executable = Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False):
+        # The shipped executable lives in <project>\\dist\\CameraAgentMonitor.exe.
+        candidates.extend((executable.parent, executable.parent.parent))
+    else:
+        candidates.append(Path(__file__).resolve().parents[1])
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (candidate / "agent.py").is_file() and (candidate / "config" / "devices.yaml").is_file():
+            return candidate
+    raise RuntimeError(
+        "Không tìm thấy project camera-agent. Hãy đặt CAMERA_AGENT_PROJECT tới thư mục "
+        "chứa agent.py và config\\devices.yaml."
+    )
+
+
 def main() -> int:
     args = parse_args()
-    project = Path(os.getenv("CAMERA_AGENT_PROJECT", Path.cwd())).resolve()
-    if not (project / "agent.py").exists():
-        project = Path(__file__).resolve().parents[1]
+    project = find_project_root()
+    devices_path = Path(args.devices)
+    if not devices_path.is_absolute():
+        devices_path = project / devices_path
+    devices_path = devices_path.resolve()
+    if not devices_path.is_file():
+        raise RuntimeError(f"Không tìm thấy manifest: {devices_path}")
     agent_python = os.getenv("CAMERA_AGENT_PYTHON")
     if not agent_python:
         candidate = project / ".venv" / "Scripts" / "python.exe"
@@ -206,7 +239,7 @@ def main() -> int:
         "-u",
         str(project / "agent.py"),
         "--devices",
-        args.devices,
+        str(devices_path),
         "--preview-mode",
         args.preview_mode,
     ]
