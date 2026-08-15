@@ -61,6 +61,24 @@ def resolve_device_publish_key(
     return key
 
 
+def resolve_device_messages_path(
+    device_id: str,
+    manifest_path: Path,
+    base_settings: Settings,
+) -> str:
+    """Resolve the selected device's HTTP channel endpoint, never a global guess."""
+
+    fleet = FleetConfig.from_yaml(manifest_path, base_settings, require_mainflux=False)
+    matches = [
+        device for device in fleet.configured_devices if device.device_id == device_id
+    ]
+    if len(matches) != 1:
+        raise ConfigurationError(
+            f"Device {device_id!r} was not found exactly once in {manifest_path}"
+        )
+    return matches[0].settings.mainflux_messages_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Check Mainflux health and optionally publish a SenML probe."
@@ -89,7 +107,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = Settings.from_env(args.env_file)
     base_url = settings.mainflux_url
-    messages_path = settings.mainflux_messages_path
     verify_tls = settings.mainflux_verify_tls
 
     try:
@@ -127,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         key = resolve_device_publish_key(args.device_id, manifest_path, settings)
+        messages_path = resolve_device_messages_path(
+            args.device_id, manifest_path, settings
+        )
     except (ConfigurationError, FileNotFoundError) as exc:
         print(f"ERROR: {exc}")
         return 2

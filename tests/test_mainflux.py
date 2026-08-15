@@ -8,6 +8,7 @@ import requests
 
 from camera_agent.config import build_mainflux_destination_id
 from camera_agent.decision import AgentState, Decision
+from camera_agent.features import FeatureId
 from camera_agent.mainflux import MainfluxError, MainfluxPublisher, Telemetry
 from camera_agent.outbox import SQLiteEventOutbox
 from camera_agent.rules import RuleEvaluation, RuleStatus
@@ -129,6 +130,39 @@ class MainfluxTests(unittest.TestCase):
             self.assertEqual(by_name["facebook_rule_status"], int(RuleStatus.VIOLATION))
             self.assertEqual(by_name["rule_violation_event"], 1)
             self.assertTrue(all(set(item) == {"n", "v", "u"} for item in payload))
+
+    def test_person_guard_event_is_durable_before_publish_and_has_no_facebook_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = FailingSession()
+            outbox_path = Path(directory) / "outbox.sqlite3"
+            publisher = MainfluxPublisher(
+                enabled=True,
+                url="http://mainflux/http/messages",
+                thing_key="secret",
+                session=session,
+                outbox_path=outbox_path,
+                device_id="person-camera",
+                destination_id="thing:person-camera",
+            )
+            telemetry = Telemetry(
+                None,
+                True,
+                active_feature=FeatureId.PERSON_GUARD,
+                person_present=True,
+                person_confidence=0.71,
+                person_tracking=True,
+                feature_alert_event=True,
+            )
+            with self.assertRaises(MainfluxError):
+                publisher.publish(telemetry, force=True)
+
+            pending = SQLiteEventOutbox(outbox_path, "person-camera", "thing:person-camera").peek()
+            self.assertIsNotNone(pending)
+            fields = {item["n"]: item["v"] for item in pending.payload}
+            self.assertEqual(fields["active_feature"], 2)
+            self.assertEqual(fields["rule_violation_event"], 1)
+            self.assertNotIn("agent_state", fields)
+            self.assertNotIn("facebook_active", fields)
 
     def test_edge_event_is_latched_until_mainflux_recovers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -350,6 +384,41 @@ class MainfluxTests(unittest.TestCase):
         self.assertEqual(by_name["frame_age_seconds"], 0.25)
         self.assertEqual(by_name["inference_ms"], 42.5)
         self.assertEqual(by_name["rtsp_reconnect_count"], 3)
+
+    def test_custom_pentest_event_uses_the_durable_outbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = FailingOnceSession()
+            publisher = MainfluxPublisher(
+                enabled=True,
+                url="http://mainflux/http/messages",
+                thing_key="secret",
+                session=session,
+                retry_backoff=0.1,
+                outbox_path=Path(directory) / "outbox.sqlite3",
+                device_id="security-agent-01",
+                destination_id="thing:security-agent-01",
+            )
+            payload = [{"n": "pentest_finding_event", "v": 1, "u": "bool"}]
+            with self.assertRaises(MainfluxError):
+                publisher.publish_payload(
+                    payload,
+                    signature=(2, 1, 1, 0),
+                    event=True,
+                    force=True,
+                )
+            self.assertEqual(session.calls.__len__(), 1)
+            publisher.next_retry_time = 0
+            self.assertTrue(
+                publisher.publish_payload(
+                    payload,
+                    signature=(2, 1, 1, 0),
+                    event=False,
+                )
+            )
+            self.assertEqual(session.calls.__len__(), 2)
+            self.assertEqual(
+                session.calls[-1][1]["json"], payload,
+            )
 
 
 if __name__ == "__main__":

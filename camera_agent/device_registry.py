@@ -20,6 +20,9 @@ from .rules import (
     RuleConfigurationError,
     RulesConfig,
 )
+from .pentest import validate_target_host, validate_target_ports
+from .features import FeatureId
+from .person_guard import PersonGuardConfig
 
 
 DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
@@ -35,10 +38,16 @@ COMMON_DEVICE_FIELDS = {
     "device_id",
     "display_name",
     "enabled",
+    "agent_type",
     "source_type",
     "source",
     "mainflux",
+    "pentest",
     "physical_alarm",
+    "features",
+    "control",
+    "ptz",
+    "auto_patrol",
     "monitor_roi",
     "process_interval",
     "rules",
@@ -84,9 +93,56 @@ SOURCE_FIELDS = {
         "reconnect_initial",
         "reconnect_max",
     },
+    "pentest": {
+        "target_host",
+        "ports",
+        "http_scheme",
+        "http_port",
+        "http_path",
+        "connect_timeout",
+        "request_timeout",
+        "verify_tls",
+        "allow_public_target",
+        "rtsp_probe",
+        "http_options_probe",
+        "tls_assessment",
+    },
 }
-MAINFLUX_FIELDS = {"thing_id", "thing_name", "thing_key_env", "group_id"}
+MAINFLUX_FIELDS = {
+    "thing_id", "thing_name", "thing_key_env", "group_id", "channel_id", "control_channel_id"
+}
 RULE_FIELDS = {"template", "overrides"}
+PTZ_FIELDS = {"enabled", "provider", "port", "profile_token", "velocity", "move_duration_seconds"}
+AUTO_PATROL_FIELDS = {
+    "enabled", "observe_seconds", "search_move_interval_seconds", "max_alarm_events_per_screen"
+}
+FEATURES_FIELDS = {"available", "default", "person_guard"}
+PERSON_GUARD_FIELDS = {
+    "model_path_env",
+    "model_sha256_env",
+    "minimum_confidence",
+    "confirmation_frames",
+    "absence_rearm_seconds",
+    "tracking_dead_zone",
+    "tracking_move_duration_seconds",
+    "tracking_move_interval_seconds",
+}
+CONTROL_FIELDS = {"preview_url_env", "preview_token_env"}
+PENTEST_FIELDS = {
+    "target_host",
+    "target_from_source",
+    "ports",
+    "http_scheme",
+    "http_port",
+    "http_path",
+    "connect_timeout",
+    "request_timeout",
+    "verify_tls",
+    "allow_public_target",
+    "rtsp_probe",
+    "http_options_probe",
+    "tls_assessment",
+}
 DEFAULT_RULES_CONFIG = RulesConfig(
     facebook=FacebookRuleConfig(),
     camera_offline=CameraOfflineRuleConfig(),
@@ -245,10 +301,16 @@ def validate_device_spec(device: Any, *, location: str = "device") -> None:
     if not isinstance(device.get("enabled"), bool):
         raise RegistryValidationError(f"{location}.enabled must be true or false")
 
+    agent_type = device.get("agent_type", "camera")
+    if agent_type not in {"camera", "pentest"}:
+        raise RegistryValidationError(
+            f"{location}.agent_type must be camera or pentest"
+        )
+
     source_type = device.get("source_type")
     if source_type not in SOURCE_FIELDS:
         raise RegistryValidationError(
-            f"{location}.source_type must be rtsp, adb, window or webcam"
+            f"{location}.source_type must be rtsp, adb, window, webcam or pentest"
         )
     source = device.get("source")
     if not isinstance(source, Mapping):
@@ -260,6 +322,24 @@ def validate_device_spec(device: Any, *, location: str = "device") -> None:
             + ", ".join(sorted(unknown_source))
         )
     _validate_source(source_type, source, location=f"{location}.source")
+    if source_type == "pentest":
+        agent_type = "pentest"
+    pentest = device.get("pentest")
+    if agent_type == "pentest" and source_type != "pentest":
+        if not isinstance(pentest, Mapping):
+            raise RegistryValidationError(
+                f"{location}.pentest must be an object for a pentest agent"
+            )
+        _validate_pentest_config(
+            pentest,
+            source_type=source_type,
+            source=source,
+            location=f"{location}.pentest",
+        )
+    elif pentest is not None:
+        raise RegistryValidationError(
+            f"{location}.pentest requires agent_type: pentest"
+        )
 
     mainflux = device.get("mainflux")
     if not isinstance(mainflux, Mapping):
@@ -270,7 +350,7 @@ def validate_device_spec(device: Any, *, location: str = "device") -> None:
             f"{location}.mainflux has unsupported fields: "
             + ", ".join(sorted(unknown_mainflux))
         )
-    for field in ("thing_id", "thing_name", "group_id"):
+    for field in ("thing_id", "thing_name", "group_id", "channel_id", "control_channel_id"):
         value = mainflux.get(field)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise RegistryValidationError(f"{location}.mainflux.{field} cannot be empty")
@@ -324,9 +404,21 @@ def validate_device_spec(device: Any, *, location: str = "device") -> None:
     if not isinstance(overrides, dict):
         raise RegistryValidationError(f"{location}.rules.overrides must be an object")
     try:
-        DEFAULT_RULES_CONFIG.with_overrides(overrides)
+        effective_rules = DEFAULT_RULES_CONFIG.with_overrides(overrides)
     except RuleConfigurationError as exc:
         raise RegistryValidationError(f"{location}.rules: {exc}") from exc
+    ptz = device.get("ptz", {})
+    _validate_ptz(ptz, source_type=source_type, source=source, location=f"{location}.ptz")
+    auto_patrol = device.get("auto_patrol", {})
+    _validate_auto_patrol(
+        auto_patrol,
+        ptz_enabled=bool(ptz.get("enabled", False)) if isinstance(ptz, Mapping) else False,
+        rules=effective_rules,
+        agent_type=agent_type,
+        location=f"{location}.auto_patrol",
+    )
+    _validate_features(device.get("features"), agent_type=agent_type, location=f"{location}.features")
+    _validate_control(device.get("control"), location=f"{location}.control")
 
 
 class _ManifestLock:
@@ -662,6 +754,247 @@ def _validate_env_reference(value: Any, location: str) -> None:
         )
 
 
+def _validate_pentest_config(
+    pentest: Mapping[str, Any],
+    *,
+    source_type: str,
+    source: Mapping[str, Any],
+    location: str,
+) -> None:
+    unknown = set(pentest) - PENTEST_FIELDS
+    if unknown:
+        raise RegistryValidationError(
+            f"{location} has unsupported fields: {', '.join(sorted(unknown))}"
+        )
+    target_from_source = pentest.get("target_from_source", False)
+    if not isinstance(target_from_source, bool):
+        raise RegistryValidationError(f"{location}.target_from_source must be boolean")
+    target_host = pentest.get("target_host")
+    if target_from_source:
+        if target_host is not None:
+            raise RegistryValidationError(
+                f"{location}.target_host and target_from_source are mutually exclusive"
+            )
+        if source_type != "rtsp" or source.get("url_env") or not source.get("host"):
+            raise RegistryValidationError(
+                f"{location}.target_from_source requires structured RTSP host"
+            )
+        target_host = source.get("host")
+    if target_host is None:
+        raise RegistryValidationError(
+            f"{location}.target_host is required unless target_from_source is true"
+        )
+    try:
+        validate_target_host(target_host)
+    except ValueError as exc:
+        raise RegistryValidationError(f"{location}.target_host is invalid: {exc}") from exc
+
+    raw_ports = pentest.get("ports")
+    if isinstance(raw_ports, str):
+        try:
+            raw_ports = [int(part.strip()) for part in raw_ports.split(",") if part.strip()]
+        except ValueError as exc:
+            raise RegistryValidationError(f"{location}.ports must contain integers") from exc
+    if not isinstance(raw_ports, (list, tuple)):
+        raise RegistryValidationError(f"{location}.ports must be a list")
+    try:
+        validated_ports = validate_target_ports(raw_ports)
+    except ValueError as exc:
+        raise RegistryValidationError(f"{location}.ports: {exc}") from exc
+
+    http_scheme = pentest.get("http_scheme")
+    if http_scheme not in {None, "http", "https"}:
+        raise RegistryValidationError(
+            f"{location}.http_scheme must be http, https or omitted"
+        )
+    if http_scheme is not None:
+        http_port = pentest.get("http_port", 443 if http_scheme == "https" else 80)
+        if isinstance(http_port, bool) or not isinstance(http_port, int) or not 1 <= http_port <= 65535:
+            raise RegistryValidationError(f"{location}.http_port must be 1..65535")
+        if http_port not in validated_ports:
+            raise RegistryValidationError(
+                f"{location}.http_port must be included in the bounded ports list"
+            )
+    http_path = pentest.get("http_path", "/")
+    if (
+        not isinstance(http_path, str)
+        or not http_path.startswith("/")
+        or "\r" in http_path
+        or "\n" in http_path
+        or len(http_path) > 2048
+    ):
+        raise RegistryValidationError(f"{location}.http_path must be a safe absolute path")
+    for field in ("connect_timeout", "request_timeout"):
+        if field in pentest:
+            _number_in_range(pentest[field], 0.1, 30.0, f"{location}.{field}")
+    for field in ("verify_tls", "allow_public_target"):
+        if field in pentest and not isinstance(pentest[field], bool):
+            raise RegistryValidationError(f"{location}.{field} must be boolean")
+    for field in ("rtsp_probe", "http_options_probe", "tls_assessment"):
+        if field in pentest and not isinstance(pentest[field], bool):
+            raise RegistryValidationError(f"{location}.{field} must be boolean")
+    if pentest.get("rtsp_probe", False):
+        if 554 not in validated_ports:
+            raise RegistryValidationError(
+                f"{location}.rtsp_probe requires port 554 in the bounded ports list"
+            )
+    if pentest.get("http_options_probe", False) and http_scheme is None:
+        raise RegistryValidationError(f"{location}.http_options_probe requires http_scheme")
+    if pentest.get("tls_assessment", False) and http_scheme != "https":
+        raise RegistryValidationError(
+            f"{location}.tls_assessment requires http_scheme: https"
+        )
+
+
+def _validate_ptz(
+    ptz: Any,
+    *,
+    source_type: str,
+    source: Mapping[str, Any],
+    location: str,
+) -> None:
+    if ptz is None:
+        ptz = {}
+    if not isinstance(ptz, Mapping):
+        raise RegistryValidationError(f"{location} must be an object")
+    unknown = set(ptz) - PTZ_FIELDS
+    if unknown:
+        raise RegistryValidationError(f"{location} has unsupported fields: {', '.join(sorted(unknown))}")
+    enabled = ptz.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise RegistryValidationError(f"{location}.enabled must be boolean")
+    provider = ptz.get("provider", "onvif" if enabled else "none")
+    if provider not in {"none", "onvif"}:
+        raise RegistryValidationError(f"{location}.provider must be none or onvif")
+    port = ptz.get("port", 2020)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise RegistryValidationError(f"{location}.port must be 1..65535")
+    token = ptz.get("profile_token")
+    if token is not None and (not isinstance(token, str) or not token.strip()):
+        raise RegistryValidationError(f"{location}.profile_token cannot be empty")
+    _number_in_range(ptz.get("velocity", 0.35), 0.000001, 1.0, f"{location}.velocity")
+    _number_in_range(ptz.get("move_duration_seconds", 0.7), 0.1, 5.0, f"{location}.move_duration_seconds")
+    if enabled:
+        if provider != "onvif":
+            raise RegistryValidationError(f"{location}.provider=onvif is required when enabled")
+        if source_type != "rtsp" or "url_env" in source:
+            raise RegistryValidationError(f"{location}.provider=onvif requires structured RTSP source")
+        if not source.get("host") or not source.get("username_env") or not source.get("password_env"):
+            raise RegistryValidationError(f"{location}.provider=onvif requires camera account references")
+
+
+def _validate_auto_patrol(
+    auto_patrol: Any,
+    *,
+    ptz_enabled: bool,
+    rules: RulesConfig,
+    agent_type: str,
+    location: str,
+) -> None:
+    if auto_patrol is None:
+        auto_patrol = {}
+    if not isinstance(auto_patrol, Mapping):
+        raise RegistryValidationError(f"{location} must be an object")
+    unknown = set(auto_patrol) - AUTO_PATROL_FIELDS
+    if unknown:
+        raise RegistryValidationError(f"{location} has unsupported fields: {', '.join(sorted(unknown))}")
+    enabled = auto_patrol.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise RegistryValidationError(f"{location}.enabled must be boolean")
+    _number_in_range(auto_patrol.get("observe_seconds", 5.0), 1.0, 120.0, f"{location}.observe_seconds")
+    _number_in_range(
+        auto_patrol.get("search_move_interval_seconds", 1.0), 0.1, 30.0,
+        f"{location}.search_move_interval_seconds",
+    )
+    alarms = auto_patrol.get("max_alarm_events_per_screen", 3)
+    if isinstance(alarms, bool) or not isinstance(alarms, int) or not 1 <= alarms <= 10:
+        raise RegistryValidationError(f"{location}.max_alarm_events_per_screen must be 1..10")
+    if enabled and agent_type != "camera":
+        raise RegistryValidationError(f"{location} requires agent_type: camera")
+    if enabled and not ptz_enabled:
+        raise RegistryValidationError(f"{location}.enabled requires ptz.enabled: true")
+    if enabled and rules.facebook.cooldown_seconds != 3:
+        raise RegistryValidationError(f"{location} requires facebook_usage.cooldown_seconds: 3")
+
+
+def _validate_features(value: Any, *, agent_type: str, location: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise RegistryValidationError(f"{location} must be an object")
+    unknown = set(value) - FEATURES_FIELDS
+    if unknown:
+        raise RegistryValidationError(f"{location} has unsupported fields: {', '.join(sorted(unknown))}")
+    available = value.get("available", [FeatureId.FACEBOOK_MONITOR.value])
+    if not isinstance(available, list) or not available:
+        raise RegistryValidationError(f"{location}.available must be a non-empty list")
+    normalized: set[FeatureId] = set()
+    for index, raw in enumerate(available, start=1):
+        if not isinstance(raw, str):
+            raise RegistryValidationError(f"{location}.available[{index}] must be text")
+        try:
+            feature = FeatureId(raw.strip())
+        except ValueError as exc:
+            raise RegistryValidationError(f"{location}.available[{index}] is unsupported") from exc
+        if feature == FeatureId.NONE:
+            raise RegistryValidationError(f"{location}.available cannot contain none")
+        if feature in normalized:
+            raise RegistryValidationError(f"{location}.available contains a duplicate feature")
+        normalized.add(feature)
+    default = value.get("default", FeatureId.FACEBOOK_MONITOR.value)
+    if not isinstance(default, str):
+        raise RegistryValidationError(f"{location}.default must be text")
+    try:
+        default_feature = FeatureId(default.strip())
+    except ValueError as exc:
+        raise RegistryValidationError(f"{location}.default is unsupported") from exc
+    if default_feature not in normalized:
+        raise RegistryValidationError(f"{location}.default must be present in available")
+    person = value.get("person_guard")
+    if FeatureId.PERSON_GUARD not in normalized:
+        if person is not None:
+            raise RegistryValidationError(f"{location}.person_guard requires person_guard in available")
+        return
+    if agent_type != "camera":
+        raise RegistryValidationError(f"{location}.person_guard requires agent_type: camera")
+    if not isinstance(person, Mapping):
+        raise RegistryValidationError(f"{location}.person_guard is required when person_guard is available")
+    unknown_person = set(person) - PERSON_GUARD_FIELDS
+    if unknown_person:
+        raise RegistryValidationError(
+            f"{location}.person_guard has unsupported fields: {', '.join(sorted(unknown_person))}"
+        )
+    _validate_env_reference(person.get("model_path_env"), f"{location}.person_guard.model_path_env")
+    _validate_env_reference(person.get("model_sha256_env"), f"{location}.person_guard.model_sha256_env")
+    try:
+        PersonGuardConfig(
+            minimum_confidence=float(person.get("minimum_confidence", 0.45)),
+            confirmation_frames=int(person.get("confirmation_frames", 2)),
+            absence_rearm_seconds=float(person.get("absence_rearm_seconds", 3.0)),
+            tracking_dead_zone=float(person.get("tracking_dead_zone", 0.15)),
+            tracking_move_duration_seconds=float(person.get("tracking_move_duration_seconds", 0.25)),
+            tracking_move_interval_seconds=float(person.get("tracking_move_interval_seconds", 0.5)),
+        ).validate()
+    except (TypeError, ValueError) as exc:
+        raise RegistryValidationError(f"{location}.person_guard is invalid: {exc}") from exc
+
+
+def _validate_control(value: Any, *, location: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise RegistryValidationError(f"{location} must be an object")
+    unknown = set(value) - CONTROL_FIELDS
+    if unknown:
+        raise RegistryValidationError(f"{location} has unsupported fields: {', '.join(sorted(unknown))}")
+    url_env = value.get("preview_url_env")
+    token_env = value.get("preview_token_env")
+    if url_env is None and token_env is None:
+        return
+    _validate_env_reference(url_env, f"{location}.preview_url_env")
+    _validate_env_reference(token_env, f"{location}.preview_token_env")
+
+
 def _validate_source(source_type: str, source: Mapping[str, Any], *, location: str) -> None:
     if source_type == "rtsp":
         adapter = source.get("adapter", "generic")
@@ -755,6 +1088,66 @@ def _validate_source(source_type: str, source: Mapping[str, Any], *, location: s
         _validate_timing(source, location)
         return
 
+    if source_type == "pentest":
+        try:
+            validate_target_host(source.get("target_host"))
+        except ValueError as exc:
+            raise RegistryValidationError(f"{location}.target_host is invalid: {exc}") from exc
+        raw_ports = source.get("ports")
+        if isinstance(raw_ports, str):
+            try:
+                raw_ports = [int(part.strip()) for part in raw_ports.split(",") if part.strip()]
+            except ValueError as exc:
+                raise RegistryValidationError(f"{location}.ports must contain integers") from exc
+        if not isinstance(raw_ports, (list, tuple)):
+            raise RegistryValidationError(f"{location}.ports must be a list")
+        try:
+            validate_target_ports(raw_ports)
+        except ValueError as exc:
+            raise RegistryValidationError(f"{location}.ports: {exc}") from exc
+        http_scheme = source.get("http_scheme")
+        if http_scheme not in {None, "http", "https"}:
+            raise RegistryValidationError(
+                f"{location}.http_scheme must be http, https or omitted"
+            )
+        if http_scheme is not None:
+            http_port = source.get("http_port", 443 if http_scheme == "https" else 80)
+            if isinstance(http_port, bool) or not isinstance(http_port, int) or not 1 <= http_port <= 65535:
+                raise RegistryValidationError(f"{location}.http_port must be 1..65535")
+            if http_port not in raw_ports:
+                raise RegistryValidationError(
+                    f"{location}.http_port must be included in the bounded ports list"
+                )
+        http_path = source.get("http_path", "/")
+        if (
+            not isinstance(http_path, str)
+            or not http_path.startswith("/")
+            or "\r" in http_path
+            or "\n" in http_path
+            or len(http_path) > 2048
+        ):
+            raise RegistryValidationError(f"{location}.http_path must be a safe absolute path")
+        for field in ("connect_timeout", "request_timeout"):
+            if field in source:
+                _number_in_range(source[field], 0.1, 30.0, f"{location}.{field}")
+        for field in ("verify_tls", "allow_public_target"):
+            if field in source and not isinstance(source[field], bool):
+                raise RegistryValidationError(f"{location}.{field} must be boolean")
+        for field in ("rtsp_probe", "http_options_probe", "tls_assessment"):
+            if field in source and not isinstance(source[field], bool):
+                raise RegistryValidationError(f"{location}.{field} must be boolean")
+        if source.get("rtsp_probe") and 554 not in raw_ports:
+            raise RegistryValidationError(
+                f"{location}.rtsp_probe requires port 554 in the bounded ports list"
+            )
+        if source.get("http_options_probe") and http_scheme is None:
+            raise RegistryValidationError(f"{location}.http_options_probe requires http_scheme")
+        if source.get("tls_assessment") and http_scheme != "https":
+            raise RegistryValidationError(
+                f"{location}.tls_assessment requires http_scheme: https"
+            )
+        return
+
     index = source.get("index", 0)
     if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 32:
         raise RegistryValidationError(f"{location}.index must be between 0 and 32")
@@ -829,6 +1222,20 @@ def _environment_references(device: Mapping[str, Any]) -> list[str]:
     value = mainflux.get("thing_key_env")
     if isinstance(value, str) and value:
         references.append(value)
+    features = device.get("features", {})
+    if isinstance(features, Mapping):
+        person = features.get("person_guard", {})
+        if isinstance(person, Mapping):
+            for field in ("model_path_env", "model_sha256_env"):
+                value = person.get(field)
+                if isinstance(value, str) and value:
+                    references.append(value)
+    control = device.get("control", {})
+    if isinstance(control, Mapping):
+        for field in ("preview_url_env", "preview_token_env"):
+            value = control.get(field)
+            if isinstance(value, str) and value:
+                references.append(value)
     return references
 
 

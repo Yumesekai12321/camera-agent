@@ -35,23 +35,7 @@ devices:
   process_interval: 1.0
   rules:
     template: default
-    # Conservative local alarm gate for this camera.  The classifier still
-    # reports raw scores, but a transient VS Code-like false positive must not
-    # create a Facebook event or activate the physical alarm.
-    overrides:
-      facebook_usage:
-        minimum_confidence: 0.82
-        trigger_after_seconds: 2
-        cooldown_seconds: 3
-  # Opt in to the C200's custom audio only for confirmed local events.
-  # It reuses the RTSP Camera Account references above; no secret is stored
-  # in this manifest.
-  physical_alarm:
-    enabled: true
-    provider: tapo
-    duration_seconds: 3
-    cooldown_seconds: 3
-    audio_id: 8196
+    overrides: {}
   ptz:
     enabled: true
     provider: onvif

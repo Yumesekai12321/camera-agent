@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override PREVIEW_MODE for this run.",
     )
     parser.add_argument(
+        "--web-preview",
+        action="store_true",
+        help="Enable the authenticated latest-frame preview in the loopback control UI.",
+    )
+    parser.add_argument(
         "--max-cycles",
         type=int,
         default=None,
@@ -73,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.web_preview:
+        # This process-local flag deliberately does not modify .env or YAML.
+        os.environ["LOCAL_PREVIEW_ENABLED"] = "true"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -121,9 +129,10 @@ def main() -> int:
                         else ""
                     )
                     state = "enabled" if device.enabled else "disabled"
+                    role = f", agent:{device.agent_type}" if device.agent_type != "camera" else ""
                     print(
                         f"  - {device.device_id}: {device.name} "
-                        f"[{source}, {state}{alarm}]"
+                        f"[{source}, {state}{role}{alarm}]"
                     )
             return 0
         if fleet is not None:

@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, call, patch
@@ -9,10 +10,14 @@ import numpy as np
 from camera_agent.application import CameraAgent
 from camera_agent.camera import FramePacket
 from camera_agent.config import Settings
+from camera_agent.control import CommandStore
 from camera_agent.decision import AgentState
+from camera_agent.features import FeatureId, FeatureRuntime
+from camera_agent.person_guard import PersonGuard, PersonGuardConfig
+from camera_agent.ptz import PTZMove
 from camera_agent.physical_alarm import PhysicalAlarmError, TapoSirenAlarm, build_tapo_alarm
 from camera_agent.rules import CameraOfflineRuleConfig, FacebookRuleConfig, RulesConfig
-from camera_agent.vision import Detection, ScreenExtraction
+from camera_agent.vision import Detection, PersonDetection, ScreenExtraction
 
 
 class FakeCamera:
@@ -146,6 +151,74 @@ class PhysicalAlarmTests(unittest.TestCase):
 
         self.assertEqual(alarm.reasons, ["facebook_detected"])
         self.assertEqual(agent._last_displayed_state, AgentState.FACEBOOK_DETECTED)
+
+    def test_person_guard_alarm_is_opt_in_and_does_not_run_facebook_classifier(self):
+        settings = replace(
+            Settings.from_env(Path("missing.env")),
+            preview=False,
+            preview_mode="off",
+            mainflux_enabled=False,
+            mainflux_thing_key=None,
+            process_interval=0.01,
+        )
+        detector = MagicMock()
+        classifier = MagicMock()
+        classifier.degraded = False
+        classifier.model_version = "test"
+        person_detector = MagicMock()
+        person_detector.detect.return_value = PersonDetection(
+            (0, 0, 6, 8), 0.7, 48, 0.75, 0.5
+        )
+        alarm = FakePhysicalAlarm()
+        agent = CameraAgent(
+            settings,
+            dry_run=True,
+            detector=detector,
+            classifier=classifier,
+            camera=FakeCamera(),
+            physical_alarm=alarm,
+            feature_runtime=FeatureRuntime(
+                allowed={FeatureId.FACEBOOK_MONITOR, FeatureId.PERSON_GUARD},
+                initial_feature=FeatureId.PERSON_GUARD,
+            ),
+            person_detector=person_detector,
+            person_guard=PersonGuard(PersonGuardConfig(confirmation_frames=1)),
+        )
+        agent.run(max_cycles=1)
+
+        self.assertEqual(alarm.reasons, ["person_detected"])
+        detector.extract.assert_not_called()
+        classifier.predict.assert_not_called()
+
+    def test_standby_switch_cancels_motion_without_creating_offline_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = replace(
+                Settings.from_env(Path("missing.env")), mainflux_enabled=False,
+                mainflux_thing_key=None, preview=False, preview_mode="off",
+            )
+            classifier = MagicMock()
+            classifier.degraded = False
+            classifier.model_version = "test"
+            ptz = MagicMock()
+            ptz.available = True
+            store = CommandStore(Path(directory) / "commands.sqlite3")
+            agent = CameraAgent(
+                settings,
+                dry_run=True,
+                detector=MagicMock(), classifier=classifier, camera=FakeCamera(), ptz=ptz,
+                command_store=store,
+            )
+            agent.ptz_arbiter.start("manual", PTZMove.LEFT)
+            store.enqueue(
+                "default", "set_desired_state",
+                {"runtime_enabled": False, "feature": "none", "generation": 1},
+            )
+            agent._process_control_commands()
+            agent._handle_offline()
+
+        self.assertFalse(agent.feature_runtime.snapshot().runtime_enabled)
+        self.assertEqual(agent.feature_runtime.snapshot().active_feature, FeatureId.NONE)
+        self.assertGreaterEqual(ptz.stop.call_count, 1)
 
 
 if __name__ == "__main__":

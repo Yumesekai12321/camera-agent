@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import threading
 from typing import Any
@@ -14,6 +15,21 @@ class Detection:
     box: tuple[int, int, int, int]
     confidence: float
     area: int
+
+
+@dataclass(frozen=True)
+class PersonDetection:
+    """One anonymous person box from a generic YOLO model.
+
+    The feature deliberately retains only geometry for the current frame.  It
+    neither derives identity/face attributes nor writes image material.
+    """
+
+    box: tuple[int, int, int, int]
+    confidence: float
+    area: int
+    center_x: float
+    center_y: float
 
 
 @dataclass(frozen=True)
@@ -176,3 +192,101 @@ class FacebookClassifier:
             self.idx_to_class[index]: float(probability)
             for index, probability in enumerate(probabilities)
         }
+
+
+class PersonDetector:
+    """Bounded person detector backed by an operator-installed YOLO model."""
+
+    def __init__(
+        self,
+        model_path: Path,
+        *,
+        expected_sha256: str,
+        confidence: float = 0.45,
+        image_size: int = 416,
+        shared_model: Any | None = None,
+        prediction_lock: Any | None = None,
+    ) -> None:
+        if not 0 <= confidence <= 1:
+            raise ValueError("person confidence must be between 0 and 1")
+        if image_size < 64:
+            raise ValueError("person detector image size must be at least 64")
+        self.verify_model(model_path, expected_sha256)
+        self.confidence = confidence
+        self.image_size = image_size
+        self.model = shared_model
+        self._prediction_lock = prediction_lock or threading.Lock()
+        if self.model is None:
+            from ultralytics import YOLO
+
+            self.model = YOLO(str(model_path))
+
+    @staticmethod
+    def verify_model(model_path: Path, expected_sha256: str) -> None:
+        expected = expected_sha256.strip().lower()
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Person detector model not found: {model_path}")
+        if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+            raise ValueError("person detector SHA-256 must be a 64-character hexadecimal digest")
+        digest = hashlib.sha256()
+        with model_path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != expected:
+            raise ValueError("person detector SHA-256 verification failed")
+
+    @staticmethod
+    def _class_name(names: Any, class_id: int) -> str:
+        if isinstance(names, dict):
+            value = names.get(class_id, names.get(str(class_id), ""))
+        elif isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
+            value = names[class_id]
+        else:
+            value = ""
+        return str(value).strip().casefold()
+
+    def detect(self, frame: np.ndarray) -> PersonDetection | None:
+        if frame is None or frame.size == 0:
+            return None
+        assert self.model is not None
+        with self._prediction_lock:
+            result = self.model.predict(
+                source=frame,
+                conf=self.confidence,
+                imgsz=self.image_size,
+                verbose=False,
+            )[0]
+        names = getattr(result, "names", None) or getattr(self.model, "names", None)
+        frame_height, frame_width = frame.shape[:2]
+        candidates: list[PersonDetection] = []
+        for box in result.boxes:
+            try:
+                class_id = int(float(box.cls[0]))
+                score = float(box.conf[0])
+                if self._class_name(names, class_id) != "person":
+                    continue
+                raw_x1, raw_y1, raw_x2, raw_y2 = map(int, box.xyxy[0].cpu().tolist())
+            except (AttributeError, IndexError, TypeError, ValueError):
+                continue
+            x1 = max(0, min(frame_width - 1, raw_x1))
+            y1 = max(0, min(frame_height - 1, raw_y1))
+            x2 = max(x1 + 1, min(frame_width, raw_x2))
+            y2 = max(y1 + 1, min(frame_height, raw_y2))
+            area = (x2 - x1) * (y2 - y1)
+            if score < self.confidence or area <= 0:
+                continue
+            candidates.append(
+                PersonDetection(
+                    box=(x1, y1, x2, y2),
+                    confidence=score,
+                    area=area,
+                    center_x=((x1 + x2) / 2) / frame_width,
+                    center_y=((y1 + y2) / 2) / frame_height,
+                )
+            )
+        if not candidates:
+            return None
+        # A PTZ camera can safely follow one target only.  Picking the largest
+        # high-confidence box is deterministic and does not introduce identity
+        # tracking across frames.
+        return max(candidates, key=lambda item: item.area)

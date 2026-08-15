@@ -386,6 +386,95 @@ class DeviceToolTests(unittest.TestCase):
         )
         self.assertEqual(payload["devices"][0], first)
 
+    def test_builds_pentest_device_without_secret_source_prompts(self):
+        device = build_device_spec(
+            device_id="security-agent-01",
+            display_name="Security assessment agent",
+            source_type="pentest",
+            source={"target_host": "127.0.0.1", "ports": [80, 443]},
+            mainflux={"thing_key_env": "SECURITY_AGENT_01_MAINFLUX_THING_KEY"},
+        )
+        self.assertEqual(device["source_type"], "pentest")
+        self.assertEqual(device["source"]["ports"], [80, 443])
+        self.assertNotIn("password", repr(device).lower())
+
+        result = add_device_main(
+            [
+                "--manifest",
+                str(self.manifest_path),
+                "--env-file",
+                str(self.env_path),
+                "--device-id",
+                "security-agent-01",
+                "--display-name",
+                "Security assessment agent",
+                "--source-type",
+                "pentest",
+                "--pentest-target-host",
+                "127.0.0.1",
+                "--pentest-ports",
+                "80,443",
+                "--skip-source-check",
+                "--dry-run",
+            ],
+            getpass_fn=lambda _prompt: "mainflux-key",
+            output_fn=lambda _message: None,
+            environ={},
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(self.manifest_path.read_text(encoding="utf-8").count("security-agent-01"), 0)
+
+    def test_builds_tapo_camera_backed_pentest_device(self):
+        device = build_device_spec(
+            device_id="tapo-security-agent",
+            display_name="Tapo security agent",
+            source_type="rtsp",
+            source={
+                "adapter": "tapo",
+                "host": "192.168.10.20",
+                "path": "stream1",
+                "username_env": "TAPO_SECURITY_USER",
+                "password_env": "TAPO_SECURITY_PASS",
+            },
+            mainflux={"thing_key_env": "TAPO_SECURITY_THING_KEY"},
+            agent_type="pentest",
+            pentest={"target_from_source": True, "ports": [554]},
+        )
+        validate_device_spec(device)
+        self.assertEqual(device["agent_type"], "pentest")
+        self.assertEqual(device["source_type"], "rtsp")
+        self.assertTrue(device["pentest"]["target_from_source"])
+
+    def test_cli_adds_tapo_backed_pentest_in_dry_run_without_opening_source(self):
+        result = add_device_main(
+            [
+                "--manifest",
+                str(self.manifest_path),
+                "--env-file",
+                str(self.env_path),
+                "--device-id",
+                "tapo-security-agent",
+                "--display-name",
+                "Tapo security agent",
+                "--agent-type",
+                "pentest",
+                "--source-type",
+                "tapo_rtsp",
+                "--host",
+                "192.168.10.20",
+                "--pentest-target-from-source",
+                "--pentest-ports",
+                "554",
+                "--skip-source-check",
+                "--dry-run",
+            ],
+            getpass_fn=lambda prompt: "secret-" + prompt.split(" ")[0],
+            output_fn=lambda _message: None,
+            environ={},
+        )
+        self.assertEqual(result, 0)
+        self.assertNotIn("tapo-security-agent", self.manifest_path.read_text(encoding="utf-8"))
+
     def test_checker_and_provisioning_failures_leave_files_untouched(self):
         device = rtsp_device()
         original_manifest = self.manifest_path.read_bytes()
@@ -527,6 +616,22 @@ class DeviceToolTests(unittest.TestCase):
                 device["rules"]["overrides"] = overrides
                 with self.assertRaisesRegex(RegistryValidationError, message):
                     validate_device_spec(device)
+
+    def test_validation_accepts_disabled_onvif_ptz_and_rejects_auto_without_it(self):
+        device = rtsp_device()
+        device["ptz"] = {
+            "enabled": False,
+            "provider": "onvif",
+            "port": 2020,
+            "velocity": 0.35,
+            "move_duration_seconds": 0.7,
+        }
+        device["auto_patrol"] = {"enabled": False}
+        validate_device_spec(device)
+
+        device["auto_patrol"] = {"enabled": True}
+        with self.assertRaisesRegex(RegistryValidationError, "requires ptz.enabled"):
+            validate_device_spec(device)
 
     def test_cli_redacts_hidden_secret_if_injected_checker_mentions_it(self):
         output = StringIO()

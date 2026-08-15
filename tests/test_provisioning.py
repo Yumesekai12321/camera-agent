@@ -10,6 +10,7 @@ from camera_agent.provisioning import (
     MainfluxProvisioner,
     ProvisioningError,
     build_profile,
+    build_pentest_rules,
     build_rules,
 )
 
@@ -255,6 +256,13 @@ def provisioner(session, *, group_id="group-1"):
 
 
 class ProvisioningTests(unittest.TestCase):
+    def test_pentest_rules_use_security_events_not_camera_events(self):
+        rules = build_pentest_rules("security-agent-01", "thing-1")
+        self.assertEqual(len(rules), 2)
+        fields = {rule["conditions"][0]["field"] for rule in rules}
+        self.assertEqual(fields, {"pentest_finding_event", "pentest_scan_error_event"})
+        self.assertTrue(all("Facebook" not in rule["name"] for rule in rules))
+
     def test_templates_render_per_device_names_and_exact_assignment(self):
         profile = build_profile()
         rules = build_rules("warehouse-01", "thing-1")
@@ -263,7 +271,7 @@ class ProvisioningTests(unittest.TestCase):
         self.assertEqual(
             [rule["name"] for rule in rules],
             [
-                "Camera Agent - warehouse-01 - Facebook violation",
+                "Camera Agent - warehouse-01 - Feature violation",
                 "Camera Agent - warehouse-01 - Camera offline",
             ],
         )
@@ -288,7 +296,7 @@ class ProvisioningTests(unittest.TestCase):
         self.assertIsNotNone(result.thing_id)
         self.assertIsNotNone(result.thing_key)
         self.assertIsNotNone(result.profile_id)
-        self.assertEqual(set(result.rule_ids), {"facebook_violation", "camera_offline"})
+        self.assertEqual(set(result.rule_ids), {"feature_violation", "camera_offline"})
         self.assertEqual(len(session.profiles), 1)
         self.assertEqual(len(session.things), 1)
         self.assertEqual(len(session.rules), 2)
@@ -372,7 +380,7 @@ class ProvisioningTests(unittest.TestCase):
     def test_managed_rule_drift_is_updated_without_changing_assignment(self):
         session = FakeMainfluxSession()
         first = provisioner(session).provision_device("warehouse-01", "Warehouse")
-        rule_id = first.rule_ids["facebook_violation"]
+        rule_id = first.rule_ids["feature_violation"]
         session.rules[0]["conditions"][0]["threshold"] = 9
         before = copy.deepcopy(session.assignments)
         session.clear_calls()
@@ -383,6 +391,25 @@ class ProvisioningTests(unittest.TestCase):
         self.assertEqual(session.assignments, before)
         puts = [call for call in session.mutations if call[:2] == ("PUT", f"/svcrules/rules/{rule_id}")]
         self.assertEqual(len(puts), 1)
+
+    def test_legacy_managed_facebook_rule_is_renamed_in_place(self):
+        session = FakeMainfluxSession()
+        first = provisioner(session).provision_device("warehouse-01", "Warehouse")
+        rule_id = first.rule_ids["feature_violation"]
+        rule = next(item for item in session.rules if item["id"] == rule_id)
+        rule["name"] = "Camera Agent - warehouse-01 - Facebook violation"
+        session.clear_calls()
+
+        result = provisioner(session).provision_device("warehouse-01", "Warehouse")
+
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(result.rule_ids["feature_violation"], rule_id)
+        self.assertEqual(session.assignments[rule_id], {first.thing_id})
+        self.assertEqual(rule["name"], "Camera Agent - warehouse-01 - Feature violation")
+        self.assertEqual(
+            [call[:2] for call in session.mutations],
+            [("PUT", f"/svcrules/rules/{rule_id}")],
+        )
 
     def test_empty_action_id_added_by_mainflux_is_semantically_ignored(self):
         session = FakeMainfluxSession(normalize_action_ids=True)
@@ -487,7 +514,7 @@ class ProvisioningTests(unittest.TestCase):
     def test_extra_rule_assignment_fails_without_unassigning(self):
         session = FakeMainfluxSession()
         result = provisioner(session).provision_device("warehouse-01", "Warehouse")
-        rule_id = result.rule_ids["facebook_violation"]
+        rule_id = result.rule_ids["feature_violation"]
         session.assignments[rule_id].add("another-thing")
         session.clear_calls()
 

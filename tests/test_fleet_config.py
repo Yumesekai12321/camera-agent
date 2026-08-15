@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from camera_agent.config import ConfigurationError, Settings
+from camera_agent.features import FeatureId
 from camera_agent.fleet_config import FleetConfig
 
 
@@ -95,6 +96,38 @@ devices:
         self.assertEqual(device.rules_config.facebook.minimum_confidence, 0.81)
         self.assertEqual(device.rules_config.facebook.cooldown_seconds, 15.0)
         self.assertEqual(device.rules_config.camera_offline.trigger_after_seconds, 4.0)
+
+    def test_person_guard_schema_is_strict_and_can_stage_without_model(self):
+        self.write(
+            """
+version: 2
+fleet: {preview: false}
+devices:
+  - device_id: guard-camera
+    display_name: Guard camera
+    enabled: false
+    source_type: webcam
+    source: {index: 0}
+    mainflux: {thing_key_env: GUARD_THING_KEY}
+    features:
+      available: [facebook_monitor, person_guard]
+      default: facebook_monitor
+      person_guard:
+        model_path_env: GUARD_PERSON_MODEL
+        model_sha256_env: GUARD_PERSON_SHA256
+        confirmation_frames: 2
+        tracking_move_duration_seconds: 0.25
+    rules: {template: default, overrides: {}}
+"""
+        )
+        fleet = self.load()
+        device = fleet.configured_devices[0]
+        self.assertIn(FeatureId.PERSON_GUARD, device.feature_allowed)
+        self.assertIsNone(device.person_model_path)
+
+        self.write(self.path.read_text(encoding="utf-8").replace("confirmation_frames: 2", "unexpected: true"))
+        with self.assertRaisesRegex(ConfigurationError, "unknown field"):
+            self.load()
 
     def test_rtsp_url_env_is_mutually_exclusive_with_structured_source(self):
         self.write(
@@ -193,6 +226,101 @@ devices:
         self.assertEqual(webcam.webcam_index, 2)
         self.assertEqual(webcam.webcam_width, 1920)
 
+    def test_loads_bounded_pentest_source_without_camera_models(self):
+        self.write(
+            """
+version: 2
+fleet: {preview: false}
+devices:
+  - device_id: security-agent-01
+    display_name: Security assessment agent
+    enabled: true
+    source_type: pentest
+    source:
+      target_host: 127.0.0.1
+      ports: [80, 443, 8080]
+      http_scheme: https
+      http_port: 443
+      http_path: /health
+      connect_timeout: 1.5
+      request_timeout: 2.5
+      verify_tls: true
+      allow_public_target: false
+    mainflux: {thing_key_env: SECURITY_AGENT_01_MAINFLUX_THING_KEY}
+""",
+        )
+        fleet = self.load()
+        device = fleet.devices[0]
+        self.assertEqual(device.source_type, "pentest")
+        self.assertEqual(device.pentest_target_host, "127.0.0.1")
+        self.assertEqual(device.pentest_ports, (80, 443, 8080))
+        self.assertEqual(device.pentest_http_scheme, "https")
+        self.assertEqual(device.pentest_http_path, "/health")
+        self.assertEqual(device.pentest_connect_timeout, 1.5)
+
+    def test_loads_tapo_camera_backed_pentest_agent_and_derives_target_host(self):
+        self.write(
+            """
+version: 2
+fleet: {preview: false}
+devices:
+  - device_id: tapo-security-agent
+    display_name: Tapo security agent
+    enabled: true
+    agent_type: pentest
+    source_type: rtsp
+    source:
+      adapter: tapo
+      host: 192.168.10.20
+      port: 554
+      path: stream1
+      username_env: TAPO_SECURITY_USER
+      password_env: TAPO_SECURITY_PASS
+    pentest:
+      target_from_source: true
+      ports: [554]
+      rtsp_probe: true
+      connect_timeout: 1.0
+      request_timeout: 1.0
+    mainflux: {thing_key_env: TAPO_SECURITY_THING_KEY}
+""",
+        )
+        fleet = self.load(
+            {
+                "TAPO_SECURITY_USER": "camera-user",
+                "TAPO_SECURITY_PASS": "camera-pass",
+                "TAPO_SECURITY_THING_KEY": "thing-key",
+                "MAINFLUX_ENABLED": "true",
+            },
+            require_mainflux=True,
+        )
+        device = fleet.devices[0]
+        self.assertEqual(device.agent_type, "pentest")
+        self.assertEqual(device.source_type, "rtsp")
+        self.assertEqual(device.settings.rtsp_adapter, "tapo")
+        self.assertEqual(device.pentest_target_host, "192.168.10.20")
+        self.assertEqual(device.pentest_ports, (554,))
+        self.assertTrue(device.pentest_rtsp_probe)
+
+    def test_pentest_source_rejects_large_or_unsafe_port_list(self):
+        self.write(
+            """
+version: 2
+fleet: {preview: false}
+devices:
+  - device_id: security-agent-01
+    display_name: Security assessment agent
+    enabled: false
+    source_type: pentest
+    source:
+      target_host: 127.0.0.1
+      ports: [80, 80]
+    mainflux: {thing_key_env: SECURITY_AGENT_01_MAINFLUX_THING_KEY}
+""",
+        )
+        with self.assertRaisesRegex(ConfigurationError, "ports"):
+            self.load()
+
     def test_tapo_adapter_is_a_rtsp_preset_not_a_device_id_branch(self):
         self.write(
             """
@@ -264,6 +392,64 @@ devices:
 """,
         )
         with self.assertRaisesRegex(ConfigurationError, "requires a Tapo RTSP device"):
+            self.load()
+
+    def test_loads_onvif_ptz_and_disabled_auto_patrol_without_new_secrets(self):
+        self.write(
+            """
+version: 2
+fleet: {preview: false}
+devices:
+  - device_id: ptz-camera
+    display_name: PTZ camera
+    enabled: true
+    source_type: rtsp
+    source:
+      adapter: tapo
+      host: camera.example.test
+      path: stream1
+      username_env: PTZ_USER
+      password_env: PTZ_PASS
+    ptz:
+      enabled: true
+      provider: onvif
+      port: 2020
+      velocity: 0.4
+      move_duration_seconds: 0.6
+    auto_patrol: {enabled: false}
+    mainflux: {thing_key_env: PTZ_THING_KEY}
+""",
+        )
+        device = self.load({"PTZ_USER": "user", "PTZ_PASS": "pass"}).devices[0]
+        self.assertTrue(device.ptz_enabled)
+        self.assertEqual(device.ptz_port, 2020)
+        self.assertEqual(device.ptz_velocity, 0.4)
+        self.assertFalse(device.auto_patrol_enabled)
+
+    def test_auto_patrol_requires_ptz_and_three_second_rule_cooldown(self):
+        self.write(
+            """
+version: 2
+fleet: {preview: false}
+devices:
+  - device_id: bad-auto
+    display_name: Bad auto
+    enabled: false
+    source_type: rtsp
+    source:
+      host: camera.example.test
+      path: live
+      username_env: AUTO_USER
+      password_env: AUTO_PASS
+    ptz: {enabled: false}
+    auto_patrol: {enabled: true}
+    mainflux: {thing_key_env: AUTO_THING_KEY}
+    rules:
+      template: default
+      overrides: {}
+""",
+        )
+        with self.assertRaisesRegex(ConfigurationError, "requires ptz.enabled"):
             self.load()
 
     def test_zero_enabled_devices_is_valid_for_management(self):

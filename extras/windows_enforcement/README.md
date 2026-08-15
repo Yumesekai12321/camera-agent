@@ -27,3 +27,10 @@ Script tạo backup ban đầu ở
 `C:\Windows\System32\drivers\etc\hosts.camera-agent.backup`. State 3 `CAMERA_OFFLINE` bị ignore
 để lỗi camera không tự thay đổi chính sách block hiện tại.
 
+> Đây là thành phần tùy chọn, không nằm trong monitoring core. Đọc [AGENTS.md](../../AGENTS.md) và
+> [docs/SESSION_HANDOFF.md](../../docs/SESSION_HANDOFF.md) trước khi tích hợp webhook hoặc thay đổi
+> policy; không tự bật module này từ `agent.py`.
+
+Person Guard và central desired-state không gọi module này. `person_guard` chỉ tạo Mainflux Alarm và
+còi camera đã opt-in; `none`/standby không được suy diễn thành Facebook event hoặc thay đổi `hosts`.
+Giữ module enforcement tách biệt, loopback-only và chỉ bật khi có phê duyệt riêng.
