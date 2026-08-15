@@ -8,11 +8,19 @@ import cv2
 import numpy as np
 
 from .application import AgentSnapshot, CameraAgent
+from .auto_patrol import AutoPatrol, AutoPatrolConfig
 from .camera import build_device_camera
 from .config import ConfigurationError
+from .control import CommandStore
+from .features import FeatureRuntime, FeatureId
 from .fleet_config import DeviceDefinition, FleetConfig
 from .physical_alarm import build_tapo_alarm
-from .vision import ComputerScreenDetector, FacebookClassifier
+from .person_guard import PersonGuard
+from .mainflux_control import MainfluxAgentControl, MQTTControlSettings
+from .ptz import NoopPTZ, OnvifPTZ, PTZController
+from .pentest import PentestStatus
+from .pentest_agent import PentestAgent, PentestSnapshot
+from .vision import ComputerScreenDetector, FacebookClassifier, PersonDetector
 
 
 LOGGER = logging.getLogger(__name__)
@@ -40,7 +48,7 @@ class FleetStatusBoard:
         self._errors: dict[str, str] = {}
         self._lock = threading.Lock()
 
-    def update(self, snapshot: AgentSnapshot) -> None:
+    def update(self, snapshot: AgentSnapshot | PentestSnapshot) -> None:
         with self._lock:
             self._snapshots[snapshot.device_id] = snapshot
             self._errors.pop(snapshot.device_id, None)
@@ -82,10 +90,48 @@ class FleetStatusBoard:
                 details = "CAM WAIT   SCREEN -   AI -   RULE -"
                 score = "Waiting for first frame"
                 color = (0, 180, 255)
+            elif device.agent_type == "pentest":
+                if snapshot is None:
+                    status = "STARTING"
+                    details = "SCAN -   FINDINGS -   PORTS -"
+                    score = "Waiting for first bounded scan"
+                    color = (0, 180, 255)
+                else:
+                    pentest = snapshot
+                    assert isinstance(pentest, PentestSnapshot)
+                    status = {
+                        PentestStatus.PASS: "PASS",
+                        PentestStatus.FINDINGS: "FINDINGS",
+                        PentestStatus.ERROR: "ERROR",
+                    }.get(pentest.status, "STARTING")
+                    color = (
+                        (30, 30, 235)
+                        if pentest.status == PentestStatus.FINDINGS
+                        else (0, 195, 0)
+                        if pentest.status == PentestStatus.PASS
+                        else (0, 180, 255)
+                    )
+                    details = (
+                        f"CAM {'ON' if pentest.camera_online else 'OFF'}   "
+                        f"SCAN {'OK' if pentest.scan_ok else 'ERROR'}   "
+                        f"FINDINGS {pentest.finding_count}   "
+                        f"HIGH {pentest.high_count}   PORTS {pentest.open_port_count}"
+                    )
+                    age = max(0.0, current_time - pentest.updated_at)
+                    score = (
+                        f"medium {pentest.medium_count}   low {pentest.low_count}   age {age:.1f}s"
+                    )
             else:
-                alert = snapshot.decision.facebook_active or snapshot.rule.event_triggered
+                person_mode = snapshot.active_feature == FeatureId.PERSON_GUARD
+                alert = (
+                    snapshot.person_present
+                    if person_mode
+                    else bool(snapshot.decision and snapshot.decision.facebook_active)
+                ) or snapshot.rule.event_triggered
                 if alert:
                     status, color = "ALERT", (30, 30, 235)
+                elif not snapshot.runtime_enabled:
+                    status, color = "STANDBY", (120, 120, 160)
                 elif snapshot.camera_online:
                     status, color = "READY", (0, 195, 0)
                 else:
@@ -94,16 +140,31 @@ class FleetStatusBoard:
                     snapshot.extraction.computer_detected
                     and snapshot.extraction.screen is not None
                 )
-                details = (
-                    f"CAM {'ON' if snapshot.camera_online else 'OFF'}   "
-                    f"SCREEN {'YES' if screen_found else 'NO'}   "
-                    f"AI {_short_ai_state(snapshot.decision.state.name)}   "
-                    f"RULE {snapshot.rule.status.name}"
-                )
+                if person_mode:
+                    details = (
+                        f"CAM {'ON' if snapshot.camera_online else 'OFF'}   "
+                        f"PERSON {'YES' if snapshot.person_present else 'NO'}   "
+                        f"TRACK {'ON' if snapshot.person_tracking else 'OFF'}   "
+                        f"RULE {snapshot.rule.status.name}"
+                    )
+                elif snapshot.decision is None:
+                    details = (
+                        f"CAM {'ON' if snapshot.camera_online else 'OFF'}   "
+                        f"FEATURE NONE   RULE {snapshot.rule.status.name}"
+                    )
+                else:
+                    details = (
+                        f"CAM {'ON' if snapshot.camera_online else 'OFF'}   "
+                        f"SCREEN {'YES' if screen_found else 'NO'}   "
+                        f"AI {_short_ai_state(snapshot.decision.state.name)}   "
+                        f"RULE {snapshot.rule.status.name}"
+                    )
                 age = max(0.0, current_time - snapshot.updated_at)
                 score = (
-                    f"raw {snapshot.raw_active_score:.3f}   "
-                    f"avg {snapshot.decision.active_score:.3f}   age {age:.1f}s"
+                    f"person {'present' if snapshot.person_present else 'clear'}   age {age:.1f}s"
+                    if person_mode
+                    else f"raw {snapshot.raw_active_score:.3f}   "
+                    f"avg {snapshot.decision.active_score if snapshot.decision else 0.0:.3f}   age {age:.1f}s"
                 )
 
             cv2.rectangle(
@@ -171,23 +232,85 @@ class FleetAgent:
         self.stop_event = threading.Event()
         self.board = FleetStatusBoard(config.devices)
         inference_lock = threading.Lock()
-        self.classifier = FacebookClassifier(
-            config.devices[0].settings.classifier_model,
-            torch_threads=config.devices[0].settings.torch_threads,
-            prediction_lock=inference_lock,
-        )
+        camera_devices = tuple(device for device in config.devices if device.agent_type == "camera")
+        self.classifier = None
+        if camera_devices:
+            self.classifier = FacebookClassifier(
+                camera_devices[0].settings.classifier_model,
+                torch_threads=camera_devices[0].settings.torch_threads,
+                prediction_lock=inference_lock,
+            )
 
         shared_detector_model = None
-        if any(device.settings.monitor_roi is None for device in config.devices):
+        if any(device.settings.monitor_roi is None for device in camera_devices):
             from ultralytics import YOLO
 
             shared_detector_model = YOLO(
-                str(config.devices[0].settings.computer_model)
+                str(camera_devices[0].settings.computer_model)
             )
 
-        self.agents: list[CameraAgent] = []
+        shared_person_models: dict[tuple[str, str], object] = {}
+
+        def build_person_detector(device: DeviceDefinition) -> PersonDetector | None:
+            if FeatureId.PERSON_GUARD not in device.feature_allowed:
+                return None
+            if device.person_model_path is None or not device.person_model_sha256:
+                LOGGER.warning(
+                    "[%s] Person Guard is installed but model references are not configured; selection will be rejected",
+                    device.device_id,
+                )
+                return None
+            try:
+                PersonDetector.verify_model(device.person_model_path, device.person_model_sha256)
+                key = (str(device.person_model_path.resolve()), device.person_model_sha256)
+                shared = shared_person_models.get(key)
+                if shared is None:
+                    from ultralytics import YOLO
+
+                    shared = YOLO(str(device.person_model_path))
+                    shared_person_models[key] = shared
+                return PersonDetector(
+                    device.person_model_path,
+                    expected_sha256=device.person_model_sha256,
+                    confidence=device.person_guard_config.minimum_confidence,
+                    image_size=device.settings.detector_image_size,
+                    shared_model=shared,
+                    prediction_lock=inference_lock,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                LOGGER.warning("[%s] Person Guard unavailable: %s", device.device_id, exc)
+                return None
+
+        self.agents: list[CameraAgent | PentestAgent] = []
+        command_store = (
+            CommandStore(camera_devices[0].settings.mainflux_outbox_path.parent / "control-commands.sqlite3")
+            if camera_devices
+            else None
+        )
+        control_settings = MQTTControlSettings.from_environment()
         for device in config.devices:
+            if device.agent_type == "pentest":
+                self.agents.append(
+                    PentestAgent(
+                        device,
+                        dry_run=dry_run,
+                        status_callback=self.board.update,
+                        stop_event=self.stop_event,
+                    )
+                )
+                continue
             camera = build_device_camera(device)
+            ptz: PTZController = NoopPTZ()
+            if device.ptz_enabled:
+                ptz = OnvifPTZ(
+                    host=device.settings.rtsp_host or "",
+                    port=device.ptz_port,
+                    username=device.settings.rtsp_username or "",
+                    password=device.settings.rtsp_password or "",
+                    profile_token=device.ptz_profile_token,
+                    velocity=device.ptz_velocity,
+                    move_duration_seconds=device.ptz_move_duration_seconds,
+                )
             detector = ComputerScreenDetector(
                 device.settings.computer_model,
                 confidence=device.settings.computer_confidence,
@@ -195,6 +318,19 @@ class FleetAgent:
                 normalized_roi=device.settings.monitor_roi,
                 shared_model=shared_detector_model,
                 prediction_lock=inference_lock,
+            )
+            person_detector = build_person_detector(device)
+            control_transport = (
+                MainfluxAgentControl(
+                    control_settings,
+                    device_id=device.device_id,
+                    thing_id=device.mainflux_thing_id,
+                    thing_key=device.settings.mainflux_thing_key,
+                    control_channel_id=device.mainflux_control_channel_id,
+                    command_store=command_store,
+                )
+                if command_store is not None
+                else None
             )
             self.agents.append(
                 CameraAgent(
@@ -215,6 +351,24 @@ class FleetAgent:
                         cooldown_seconds=device.physical_alarm_cooldown_seconds,
                         audio_id=device.physical_alarm_audio_id,
                     ),
+                    ptz=ptz,
+                    auto_patrol=AutoPatrol(
+                        AutoPatrolConfig(
+                            enabled=device.auto_patrol_enabled,
+                            observe_seconds=device.auto_patrol_observe_seconds,
+                            search_move_interval_seconds=device.auto_patrol_search_move_interval_seconds,
+                            max_alarm_events_per_screen=device.auto_patrol_max_alarm_events_per_screen,
+                        )
+                    ),
+                    feature_runtime=FeatureRuntime(
+                        allowed=device.feature_allowed,
+                        initial_feature=device.feature_default,
+                    ),
+                    person_detector=person_detector,
+                    person_guard=PersonGuard(device.person_guard_config),
+                    command_store=command_store,
+                    control_ack_callback=(control_transport.publish_ack if control_transport is not None else None),
+                    control_transport=control_transport,
                     status_callback=self.board.update,
                     stop_event=self.stop_event,
                 )
@@ -229,7 +383,7 @@ class FleetAgent:
 
     def run(self, *, max_cycles: int | None = None) -> None:
         LOGGER.info(
-            "Fleet starting: %s camera(s), one shared classifier, serialized inference",
+            "Fleet starting: %s device(s), camera models shared when needed, serialized inference",
             len(self.agents),
         )
         threads = [

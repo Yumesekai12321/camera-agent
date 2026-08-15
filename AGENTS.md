@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## Đọc nhanh cho session mới
+
+Đọc [docs/SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md) trước để biết trạng thái vận hành,
+lệnh khởi động và các lỗi đã xác minh. File này vẫn là quy tắc canonical; đọc toàn bộ
+`README.md` trước khi sửa runtime, manifest, provisioning hoặc hướng dẫn triển khai.
+
 ## Mục tiêu và phạm vi
 
 Repository này là Camera Agent multi-device chạy trên Windows. Runtime nhận nguồn `rtsp`,
@@ -22,10 +28,17 @@ khai. Không đọc/in `.env` thật khi không cần thiết.
 - Mọi reader RTSP/ADB/webcam/window phải chỉ giữ frame mới nhất và tự reconnect; không thêm
   queue frame không giới hạn. Không reverse-engineer hay hard-code giao thức/cổng P2P không
   được hãng công bố.
+- `agent_type: pentest` chỉ được đánh giá host, port và HTTP path đã khai báo trong manifest,
+  thuộc phạm vi được chủ hệ thống ủy quyền. Chỉ thực hiện probe read-only: TCP connect, HTTP
+  `HEAD`/`OPTIONS`, TLS/certificate và RTSP `OPTIONS` không kèm credential. Không brute-force,
+  fuzz, scan CIDR, bypass authentication, exploit, duy trì truy cập hoặc gửi request thay đổi trạng thái.
+- Log pentest chỉ chứa status, count, thời lượng và mã finding an toàn; Mainflux chỉ nhận state,
+  count và event flag. Không lưu hoặc upload response body, header/cookie value, certificate,
+  credential hay frame.
 - Full preview phải fit toàn bộ frame đúng tỉ lệ, không crop/stretch. Compact preview và fleet
   dashboard không được chứa pixel camera vì đây là hàng rào chống mirror reflection.
-- Mặc định phải phù hợp i5-8250U/8 GB: inference khoảng 1 Hz và 2 torch threads. YOLO và
-  classifier nặng dùng chung trong fleet và tất cả inference phải qua cùng một lock tuần tự.
+- Tối ưu hiệu năng: hỗ trợ đa dạng cấu hình phần cứng; YOLO và classifier nặng dùng chung trong fleet
+  và inference chạy qua lock tuần tự để đảm bảo tính ổn định tài nguyên.
 - Classifier production phải có đủ `facebook_active`, `facebook_mention`, `other`. Nếu thiếu
   `other`, chỉ cảnh báo degraded; không được tuyên bố accuracy production.
 - Dataset raw/model là tài sản. Không xóa hoặc ghi đè khi chưa có output candidate và validation
@@ -57,6 +70,8 @@ khai. Không đọc/in `.env` thật khi không cần thiết.
 - `camera_agent/fleet_config.py`: parser/validator manifest v2 và ánh xạ environment references.
 - `camera_agent/device_registry.py`: transaction local cho add/disable/remove manifest + `.env`.
 - `camera_agent/camera.py`: RTSP/ADB/webcam/window latest-frame readers và source factory.
+- `camera_agent/pentest.py`: bounded vulnerability assessment cho TCP, HTTP(S), TLS và RTSP.
+- `camera_agent/pentest_agent.py`: worker pentest theo device, source health và telemetry Mainflux.
 - `camera_agent/vision.py`: YOLO detector/ROI và MobileNet classifier.
 - `camera_agent/decision.py`: temporal voting/hysteresis và state codes.
 - `camera_agent/rules.py` + `config/rules.toml`: pending/violation/cooldown và overrides theo
@@ -68,6 +83,11 @@ khai. Không đọc/in `.env` thật khi không cần thiết.
 - `camera_agent/provisioning.py`: reconcile Thing/profile/per-device rule qua Mainflux API.
 - `camera_agent/application.py`: orchestration một device, preview và evidence opt-in.
 - `camera_agent/fleet.py`: per-device agents, shared models/lock và pixel-free fleet dashboard.
+- `camera_agent/ptz.py`: ONVIF Profile S PTZ, bounded worker move/stop; không dùng P2P.
+- `camera_agent/auto_patrol.py`: state machine quan sát 5 giây, cooldown và giới hạn 3 event.
+- `camera_agent/control.py`: typed SQLite command queue; command motion cũ hết hạn sau 120 giây.
+- `camera_agent/local_preview.py`: latest JPEG opt-in cho loopback UI; retry Windows file lock.
+- `camera_agent/presence.py`: heartbeat ngắn hạn để control UI nhận biết agent offline.
 - `tools/add_device.py`: onboarding interactive/PowerShell, source preflight và optional
   provisioning.
 - `tools/remove_device.py`: disable mặc định hoặc xóa riêng entry local khi xác nhận.
@@ -76,6 +96,8 @@ khai. Không đọc/in `.env` thật khi không cần thiết.
 - `tools/check_tapo.py` và `tools/check_hvip01.py`: preflight riêng cho hai adapter ví dụ.
 - `tools/check_tapo_alarm.py`: validate/kích thử còi vật lý Tapo; cần `--yes` để phát âm thật.
 - `tools/check_window.py`, `tools/check_webcam.py`, `tools/calibrate_roi.py`: tiện ích generic.
+- `tools/control_server.py`: loopback UI/API, token `CONTROL_SERVER_TOKEN`, không tự chạy agent.
+- `tools/check_onvif_ptz.py`: ONVIF probe read-only; movement chỉ khi truyền `--yes`.
 - `mainflux/profile.template.json`, `mainflux/rules.template.json`: SenML profile và rule Alarm
   parameterized theo `device_id`.
 - `extras/windows_enforcement/`: optional enforcement tách biệt.
@@ -96,21 +118,25 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 3. Nếu sửa RTSP/source factory, yêu cầu người vận hành chạy source check tương ứng trên cùng
    LAN/host; với camera generic ưu tiên `tools.add_device` preflight, Tapo dùng thêm
    `python -m tools.check_tapo`.
-4. Nếu sửa model/dataset, ghi số ảnh từng lớp, split theo device + capture session, confusion
+4. Nếu sửa pentest, viết test cho giới hạn target/port, không log secret/response data, idempotent
+   event pulse và probe protocol mới. Chỉ đánh giá target private/LAN trừ khi manifest có
+   `allow_public_target: true` cùng phê duyệt phạm vi rõ ràng.
+5. Nếu sửa model/dataset, ghi số ảnh từng lớp, split theo device + capture session, confusion
    matrix và giới hạn domain. Không random-split burst frame gần giống nhau.
-5. Nếu thay payload Mainflux, giữ tên measurement/SenML, đồng bộ README/tests và chỉ test publish
+6. Nếu thay payload Mainflux, giữ tên measurement/SenML, đồng bộ README/tests và chỉ test publish
    theo đúng device: `python -m tools.check_mainflux --device-id <id> --publish-test`.
-6. Nếu sửa rule, test edge/cooldown local, template parameterization, exact assignment,
+7. Nếu sửa rule, test edge/cooldown local, template parameterization, exact assignment,
    idempotency, overlap legacy/foreign và late-race verification.
-7. Nếu sửa fleet, test duplicate device/key/Thing, isolation state/publisher/outbox, một model
+8. Nếu sửa fleet, test duplicate device/key/Thing, isolation state/publisher/outbox, một model
    shared và một inference lock cho cả detector lẫn classifier.
-8. Nếu sửa onboarding, test dry-run byte-for-byte, hidden secret, rerun/no-op, rollback khi commit
+9. Nếu sửa onboarding, test dry-run byte-for-byte, hidden secret, rerun/no-op, rollback khi commit
    file thứ hai thất bại, preflight failure, duplicate resolved Thing key và disable isolation.
 
 ## Bàn giao hiện tại
 
-- `config/devices.yaml` đã migrate sang schema v2 và hiện có một device enabled là `yume-1`; không
-  tự ngắt/xóa/re-provision Thing hiện tại. `config/devices.example.yaml` là catalog nguồn generic.
+- `config/devices.yaml` đã migrate sang schema v2. Trạng thái enable là dữ liệu vận hành do người
+  dùng quản lý; không tự ngắt, xóa hoặc re-provision Thing hiện tại. `config/devices.example.yaml`
+  là catalog nguồn generic.
 - Onboard thiết bị mới bằng `tools.add_device`; reset hai adapter cũ chỉ được làm theo reset plan
   trong README sau khi người dùng xác nhận và thao tác phần cứng/Mainflux cần thiết.
 - Mainflux cũ có thể còn hai shared legacy rules. Provisioner mới phải dừng khi phát hiện overlap;
@@ -128,6 +154,36 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 
 ## Cập nhật runtime hiện tại
 
+- Central control local dùng desired-state SQLite và command queue; MQTT Mainflux qua TLS/VPN là
+  lựa chọn mở rộng khi deployment đã provision controller/control channel. Nếu không có MQTT,
+  desired state vẫn được replay sau khi agent restart. Khi dùng MQTT, topic phải theo
+  `channels/<control_channel_id>/messages/camera-agent/...`; MQTT username là Thing ID, password là
+  Thing key. Mỗi control channel chỉ có controller Thing và agent Thing. Không dùng MQTT để tải code,
+  model, frame hay token browser; agent chỉ nhận schema desired-state/typed PTZ allow-list.
+- `features` là catalog versioned trong manifest: tối đa một feature `facebook_monitor` hoặc
+  `person_guard`; `none` chỉ deactivate. `runtime_enabled: false` là standby, phải dừng reader,
+  inference, preview và PTZ mà không tạo state/event `CAMERA_OFFLINE`, nhưng vẫn nhận lệnh MQTT.
+- Person Guard dùng YOLO COCO `yolo11n.pt` local đã verify SHA-256 trước startup feature. Không train,
+  auto-download runtime, identity/face recognition, lưu frame hay gửi pixel. Confirm 2 frame,
+  re-arm sau 3 giây absent; event phải SQLite outbox-first. PTZ tracking chỉ largest box, segment
+  <=0.25s, interval >=0.5s và qua `PTZArbiter`; switch/standby/Stop hủy motion cũ.
+- `mainflux.channel_id` nếu deployment có telemetry channel sẽ dùng route `/http/channels/<id>/messages`;
+  `control_channel_id`
+  là private control route. Route cũ `/http/messages` đã xác minh mismatch ở deployment cũ, không
+  đưa production lên nếu chưa điền UUID và pass `tools.check_mainflux` + `tools.check_mainflux_control`.
+
+- `yume-1` đang dùng RTSP `172.16.7.62:554/stream1` và ONVIF `2020`; probe ONVIF read-only đã PASS.
+- PTZ manual/auto chạy worker riêng. Facebook Auto patrol quét `RIGHT ×3 -> DOWN -> LEFT ×3 -> DOWN`,
+  manifest hiện dùng `velocity: 0.55`, `move_duration_seconds: 2.0`, interval `2.2`; Person Guard
+  Auto chỉ tracking người đã phát hiện, không patrol đi tìm người.
+- Control server không phải agent. Chạy một `agent.py` và một `python -m tools.control_server`; agent
+  heartbeat giúp UI trả `503 agent offline` thay vì queue vô hạn. Preview web phải opt-in bằng
+  `agent.py --web-preview --no-preview` và chỉ giữ một JPEG local.
+- Windows có thể khóa JPEG khi browser đọc; preview writer phải retry/bỏ frame, không được làm chết
+  `CameraAgent` hoặc Fleet.
+- Mainflux hiện vẫn nhận `404` tại `http://localhost/http/messages`; đây là route/deployment mismatch,
+  không tự đổi secret. Cần xác nhận base URL, adapter path và channel ID trước khi sửa publisher.
+
 - Tapo C200 của `yume-1` từ chối các method `setSirenStatus` và `play_alarm`, nhưng hỗ trợ
   `testUsrDefAudio`; physical alarm dùng custom audio ID trong `physical_alarm.audio_id` (hiện là
   `8196`). Không reverse-engineer thêm giao thức hoặc tự downgrade firmware.
@@ -136,8 +192,9 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 - `tools/monitor.py` phải tìm được project root khi chạy từ source hoặc PyInstaller executable,
   truyền manifest tuyệt đối và dùng `.venv\Scripts\python.exe` nếu tồn tại. Monitor không được hiển
   thị pixel camera.
-- Regression gate gần nhất: `120/120` unittest PASS, `compileall` PASS và
-  `agent.py --check-config` PASS với `1/1` device enabled.
+- Regression gate trước rollout Person Guard (2026-08-15): `177/177` unittest PASS, `compileall` PASS
+  và `agent.py --check-config` PASS. `/http/messages` vẫn phụ thuộc deployment Mainflux hiện tại;
+  không coi publish thực tế là production-ready nếu chưa pass đúng route.
 
 ## Tài liệu, bảo mật và vận hành
 
@@ -145,6 +202,8 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 - `.env` không commit; `.env.example` chỉ có placeholder. Không in secret trong dry-run, error,
   repr hoặc test fixture.
 - Không mở RTSP 554 ra Internet; dùng LAN tin cậy hoặc VPN.
+- Vulnerability assessment không phải quyền tự động “thâm nhập”. Mọi test active phải có owner,
+  scope, cửa sổ vận hành và phương án rollback được phê duyệt; ưu tiên staging trước production.
 - Giám sát nhân viên cần thông báo, mục đích rõ ràng, retention tối thiểu và human review.
 - Không tuyên bố hệ thống “xác định truy cập Facebook” tuyệt đối; đây là phân loại hình ảnh có
   false positive/false negative.

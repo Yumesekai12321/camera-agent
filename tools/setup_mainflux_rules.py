@@ -144,6 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DEVICE_ID=DISPLAY_NAME",
         help="Optional human-readable Thing display name metadata",
     )
+    parser.add_argument(
+        "--rule-set",
+        choices=("camera", "pentest"),
+        default="camera",
+        help="Rule set matching the device source type; defaults to camera",
+    )
     parser.add_argument("--email", help="Mainflux login email; password is always prompted")
     parser.add_argument(
         "--dry-run",
@@ -197,13 +203,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         provisioner.login(email, password)
         results = []
         for device_id, thing_id in targets:
+            provision_kwargs = {
+                "thing_id": thing_id,
+                "dry_run": args.dry_run,
+                "allow_create": False,
+            }
+            if args.rule_set != "camera":
+                provision_kwargs["rule_set"] = args.rule_set
             results.append(
                 provisioner.provision_device(
                     device_id,
                     display_names.get(device_id, device_id),
-                    thing_id=thing_id,
-                    dry_run=args.dry_run,
-                    allow_create=False,
+                    **provision_kwargs,
                 )
             )
     except (ProvisioningError, ValueError) as exc:

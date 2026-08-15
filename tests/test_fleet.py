@@ -111,6 +111,65 @@ class FleetStatusBoardTests(unittest.TestCase):
         self.assertIsNot(first.rule_engine, second.rule_engine)
         self.assertIsNot(first.publisher, second.publisher)
 
+    @patch("camera_agent.fleet.PentestAgent")
+    @patch("camera_agent.fleet.FacebookClassifier")
+    def test_pentest_device_does_not_load_camera_models(self, classifier_class, pentest_class):
+        settings = replace(
+            Settings.from_env(Path("missing.env")),
+            preview=False,
+            preview_mode="off",
+            mainflux_enabled=False,
+            mainflux_thing_key=None,
+            monitor_roi=(0.0, 0.0, 1.0, 1.0),
+        )
+        device = DeviceDefinition(
+            "security-agent-01",
+            "Security assessment agent",
+            settings,
+            source_type="pentest",
+            agent_type="pentest",
+            pentest_target_host="127.0.0.1",
+            pentest_ports=(80, 443),
+        )
+
+        fleet = FleetAgent(FleetConfig((device,), preview=False), dry_run=True)
+
+        classifier_class.assert_not_called()
+        pentest_class.assert_called_once()
+        self.assertEqual(len(fleet.agents), 1)
+
+    @patch("camera_agent.fleet.PentestAgent")
+    @patch("camera_agent.fleet.FacebookClassifier")
+    def test_tapo_backed_pentest_uses_camera_source_without_loading_facebook_models(
+        self,
+        classifier_class,
+        pentest_class,
+    ):
+        settings = replace(
+            Settings.from_env(Path("missing.env")),
+            preview=False,
+            preview_mode="off",
+            mainflux_enabled=False,
+            mainflux_thing_key=None,
+            monitor_roi=(0.0, 0.0, 1.0, 1.0),
+        )
+        device = DeviceDefinition(
+            "tapo-security-agent",
+            "Tapo security agent",
+            settings,
+            source_type="rtsp",
+            agent_type="pentest",
+            pentest_target_host="192.168.10.20",
+            pentest_ports=(554,),
+        )
+
+        fleet = FleetAgent(FleetConfig((device,), preview=False), dry_run=True)
+
+        classifier_class.assert_not_called()
+        pentest_class.assert_called_once()
+        self.assertIs(pentest_class.call_args.args[0], device)
+        self.assertEqual(len(fleet.agents), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

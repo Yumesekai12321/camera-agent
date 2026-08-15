@@ -29,6 +29,8 @@ def build_device_spec(
     source_type: str,
     source: Mapping[str, Any],
     mainflux: Mapping[str, Any],
+    agent_type: str = "camera",
+    pentest: Mapping[str, Any] | None = None,
     enabled: bool = True,
     monitor_roi: list[float] | tuple[float, float, float, float] | None = None,
     process_interval: float = 1.0,
@@ -36,6 +38,9 @@ def build_device_spec(
 ) -> dict[str, Any]:
     """Build the canonical v2 device shape without resolving any secret values."""
     normalized_source_type = source_type.strip().lower()
+    normalized_agent_type = agent_type.strip().lower()
+    if normalized_source_type == "pentest":
+        normalized_agent_type = "pentest"
     source_config = deepcopy(dict(source))
     if normalized_source_type == "tapo_rtsp":
         normalized_source_type = "rtsp"
@@ -65,16 +70,24 @@ def build_device_spec(
     elif normalized_source_type == "webcam":
         source_config.setdefault("index", 0)
         source_config.setdefault("backend", "dshow")
+    elif normalized_source_type == "pentest":
+        source_config.setdefault("ports", [80, 443])
+        source_config.setdefault("connect_timeout", 3.0)
+        source_config.setdefault("request_timeout", 5.0)
+        source_config.setdefault("verify_tls", True)
+        source_config.setdefault("allow_public_target", False)
+        source_config.setdefault("http_path", "/")
 
     mainflux_config = deepcopy(dict(mainflux))
     mainflux_config.setdefault("thing_name", f"camera-agent-{device_id}")
     mainflux_config.setdefault(
         "thing_key_env", generated_env_name(device_id, "mainflux_thing_key")
     )
-    return {
+    result = {
         "device_id": device_id,
         "display_name": display_name,
         "enabled": bool(enabled),
+        "agent_type": normalized_agent_type,
         "source_type": normalized_source_type,
         "source": source_config,
         "mainflux": mainflux_config,
@@ -82,6 +95,9 @@ def build_device_spec(
         "process_interval": float(process_interval),
         "rules": deepcopy(dict(rules or {"template": "default", "overrides": {}})),
     }
+    if normalized_agent_type == "pentest" and normalized_source_type != "pentest":
+        result["pentest"] = deepcopy(dict(pentest or {}))
+    return result
 
 
 def onboard_device(
@@ -125,6 +141,13 @@ def onboard_device(
             signature = None
         if signature is None or "thing_key" in signature.parameters:
             kwargs["thing_key"] = thing_key
+        if signature is None or "rule_set" in signature.parameters:
+            kwargs["rule_set"] = (
+                "pentest"
+                if candidate.get("agent_type") == "pentest"
+                or candidate.get("source_type") == "pentest"
+                else "camera"
+            )
         provisioned = provisioner.provision_device(
             candidate["device_id"],
             candidate["display_name"],
@@ -157,15 +180,16 @@ def onboard_device(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Add one generic camera source to a version 2 devices manifest."
+        description="Add one camera or bounded pentest source to a version 2 devices manifest."
     )
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--device-id")
     parser.add_argument("--display-name")
+    parser.add_argument("--agent-type", choices=("camera", "pentest"), default="camera")
     parser.add_argument(
         "--source-type",
-        choices=("rtsp", "tapo_rtsp", "adb", "window", "webcam"),
+        choices=("rtsp", "tapo_rtsp", "adb", "window", "webcam", "pentest"),
     )
     parser.add_argument("--disabled", action="store_true")
     parser.add_argument("--process-interval", type=float, default=1.0)
@@ -205,6 +229,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--webcam-width", type=int)
     parser.add_argument("--webcam-height", type=int)
 
+    parser.add_argument("--pentest-target-host")
+    parser.add_argument(
+        "--pentest-target-from-source",
+        action="store_true",
+        help="For a structured RTSP camera, assess the camera host itself",
+    )
+    parser.add_argument(
+        "--pentest-ports",
+        help="Finite comma-separated TCP port list, for example 80,443,8080",
+    )
+    parser.add_argument("--pentest-http-scheme", choices=("http", "https"))
+    parser.add_argument("--pentest-http-port", type=int)
+    parser.add_argument("--pentest-http-path", default="/")
+    parser.add_argument("--pentest-connect-timeout", type=float, default=3.0)
+    parser.add_argument("--pentest-request-timeout", type=float, default=5.0)
+    parser.add_argument("--pentest-no-tls-verify", action="store_true")
+    parser.add_argument("--pentest-allow-public-target", action="store_true")
+    parser.add_argument(
+        "--pentest-rtsp-probe",
+        action="store_true",
+        help="Send one unauthenticated, read-only RTSP OPTIONS assessment on port 554",
+    )
+    parser.add_argument(
+        "--pentest-http-options-probe",
+        action="store_true",
+        help="Issue one read-only HTTP OPTIONS request after the HEAD assessment",
+    )
+    parser.add_argument(
+        "--pentest-tls-assessment",
+        action="store_true",
+        help="Assess the configured HTTPS certificate lifetime and negotiated TLS version",
+    )
+
     parser.add_argument("--mainflux-thing-id")
     parser.add_argument("--mainflux-thing-name")
     parser.add_argument("--mainflux-thing-key-env")
@@ -243,9 +300,15 @@ def main(
         device_id = args.device_id or input_fn("Device ID: ").strip()
         display_name = args.display_name or input_fn("Display name: ").strip()
         source_type = args.source_type or input_fn(
-            "Source type (rtsp/tapo_rtsp/adb/window/webcam): "
+            "Source type (rtsp/tapo_rtsp/adb/window/webcam/pentest): "
         ).strip()
         source = _source_from_args(args, source_type, device_id, input_fn)
+        agent_type = "pentest" if source_type == "pentest" else args.agent_type
+        pentest = (
+            _pentest_from_args(args, source_type=source_type, source=source, input_fn=input_fn)
+            if agent_type == "pentest" and source_type != "pentest"
+            else None
+        )
         if args.provision_mainflux and not args.mainflux_group_id and provisioner is None:
             args.mainflux_group_id = input_fn("Mainflux Group ID: ").strip()
         mainflux = {
@@ -264,6 +327,8 @@ def main(
             source_type=source_type,
             source=source,
             mainflux=mainflux,
+            agent_type=agent_type,
+            pentest=pentest,
             enabled=not args.disabled,
             monitor_roi=_parse_roi(args.monitor_roi),
             process_interval=args.process_interval,
@@ -376,6 +441,28 @@ def _source_from_args(
             "fps": args.window_fps,
             "minimum_frame_std": args.minimum_frame_std,
         }
+    if source_type == "pentest":
+        host = args.pentest_target_host or input_fn("Pentest target host/IP: ").strip()
+        ports = _parse_ports(
+            args.pentest_ports
+            or input_fn("TCP ports (comma-separated, max 64): ").strip()
+        )
+        source = {
+            "target_host": host,
+            "ports": ports,
+            "http_scheme": args.pentest_http_scheme,
+            "http_path": args.pentest_http_path,
+            "connect_timeout": args.pentest_connect_timeout,
+            "request_timeout": args.pentest_request_timeout,
+            "verify_tls": not args.pentest_no_tls_verify,
+            "allow_public_target": args.pentest_allow_public_target,
+            "rtsp_probe": args.pentest_rtsp_probe,
+            "http_options_probe": args.pentest_http_options_probe,
+            "tls_assessment": args.pentest_tls_assessment,
+        }
+        if args.pentest_http_port is not None:
+            source["http_port"] = args.pentest_http_port
+        return {key: value for key, value in source.items() if value is not None}
     return {
         key: value
         for key, value in {
@@ -388,6 +475,47 @@ def _source_from_args(
     }
 
 
+def _pentest_from_args(
+    args: argparse.Namespace,
+    *,
+    source_type: str,
+    source: Mapping[str, Any],
+    input_fn: Callable[[str], str],
+) -> dict[str, Any]:
+    if args.pentest_target_from_source and source_type not in {"rtsp", "tapo_rtsp"}:
+        raise ValueError("--pentest-target-from-source requires an RTSP source")
+    if args.pentest_target_from_source and source.get("url_env"):
+        raise ValueError(
+            "--pentest-target-from-source requires structured RTSP host fields"
+        )
+    host = args.pentest_target_host
+    if not host and not args.pentest_target_from_source:
+        host = input_fn("Pentest target host/IP: ").strip()
+    ports = _parse_ports(
+        args.pentest_ports
+        or input_fn("TCP ports (comma-separated, max 64): ").strip()
+    )
+    config: dict[str, Any] = {
+        "ports": ports,
+        "http_scheme": args.pentest_http_scheme,
+        "http_path": args.pentest_http_path,
+        "connect_timeout": args.pentest_connect_timeout,
+        "request_timeout": args.pentest_request_timeout,
+        "verify_tls": not args.pentest_no_tls_verify,
+        "allow_public_target": args.pentest_allow_public_target,
+        "rtsp_probe": args.pentest_rtsp_probe,
+        "http_options_probe": args.pentest_http_options_probe,
+        "tls_assessment": args.pentest_tls_assessment,
+    }
+    if args.pentest_target_from_source:
+        config["target_from_source"] = True
+    else:
+        config["target_host"] = host
+    if args.pentest_http_port is not None:
+        config["http_port"] = args.pentest_http_port
+    return config
+
+
 def _parse_roi(value: str | None) -> list[float] | None:
     if value is None:
         return None
@@ -398,6 +526,20 @@ def _parse_roi(value: str | None) -> list[float] | None:
     if len(parts) != 4:
         raise ValueError("--monitor-roi must be x,y,width,height")
     return parts
+
+
+def _parse_ports(value: str) -> list[int]:
+    try:
+        ports = [int(part.strip()) for part in value.split(",") if part.strip()]
+    except ValueError as exc:
+        raise ValueError("--pentest-ports must be comma-separated integers") from exc
+    if not ports:
+        raise ValueError("--pentest-ports must contain at least one port")
+    if len(ports) > 64:
+        raise ValueError("--pentest-ports cannot contain more than 64 ports")
+    if len(set(ports)) != len(ports) or any(not 1 <= port <= 65535 for port in ports):
+        raise ValueError("--pentest-ports must contain unique ports between 1 and 65535")
+    return ports
 
 
 def _combined_environment(

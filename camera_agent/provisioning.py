@@ -15,11 +15,13 @@ import requests
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 PROFILE_TEMPLATE_PATH = PROJECT_DIR / "mainflux" / "profile.template.json"
 RULES_TEMPLATE_PATH = PROJECT_DIR / "mainflux" / "rules.template.json"
+PENTEST_RULES_TEMPLATE_PATH = PROJECT_DIR / "mainflux" / "pentest-rules.template.json"
 PROFILE_NAME = "Camera Agent - SenML"
 DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 PAGE_LIMIT = 200
 REQUEST_TIMEOUT_SECONDS = 10
-RULE_KINDS = ("facebook_violation", "camera_offline")
+RULE_KINDS = ("feature_violation", "camera_offline")
+PENTEST_RULE_KINDS = ("security_finding", "scan_error")
 
 
 class ProvisioningError(RuntimeError):
@@ -87,6 +89,28 @@ def build_rules(device_id: str, thing_id: str) -> list[dict[str, object]]:
     return rendered
 
 
+def build_pentest_rules(device_id: str, thing_id: str) -> list[dict[str, object]]:
+    _validate_device_id(device_id)
+    if not thing_id.strip():
+        raise ValueError("Mainflux Thing ID cannot be empty")
+    payload = _load_json(PENTEST_RULES_TEMPLATE_PATH)
+    rules = payload.get("rules") if isinstance(payload, dict) else None
+    if not isinstance(rules, list) or len(rules) != 2:
+        raise ProvisioningError("Mainflux pentest rules template must contain exactly two rules")
+    rendered = _render(rules, {"device_id": device_id, "thing_id": thing_id.strip()})
+    if not all(isinstance(rule, dict) for rule in rendered):
+        raise ProvisioningError("Mainflux pentest rules template contains an invalid rule")
+    return rendered
+
+
+def _rule_spec(rule_set: str):
+    if rule_set == "camera":
+        return RULE_KINDS, build_rules
+    if rule_set == "pentest":
+        return PENTEST_RULE_KINDS, build_pentest_rules
+    raise ValueError("rule_set must be camera or pentest")
+
+
 def profile_is_current(profile: Mapping[str, object]) -> bool:
     return _contains(profile, build_profile())
 
@@ -144,14 +168,34 @@ def _profile_compare_view(profile: Mapping[str, Any]) -> dict[str, Any]:
 
 def _rule_name(device_id: str, kind: str) -> str:
     suffix = {
-        "facebook_violation": "Facebook violation",
+        "feature_violation": "Feature violation",
         "camera_offline": "Camera offline",
     }[kind]
     return f"Camera Agent - {device_id} - {suffix}"
 
 
+def _legacy_rule_names(device_id: str, kind: str) -> tuple[str, ...]:
+    """Managed rule names that can be updated in place without unassigning."""
+
+    if kind == "feature_violation":
+        return (f"Camera Agent - {device_id} - Facebook violation",)
+    return ()
+
+
 def _managed_rule_prefix(device_id: str) -> str:
     return f"Managed by camera-agent for device '{device_id}'."
+
+
+def _is_managed_rule_description(
+    description: str,
+    device_id: str,
+    rule_builder,
+) -> bool:
+    """Accept only prefixes emitted by the current camera/pentest templates."""
+    prefixes = (_managed_rule_prefix(device_id),)
+    if rule_builder is build_pentest_rules:
+        prefixes += (f"Managed by camera-agent pentest for device '{device_id}'.",)
+    return any(description.startswith(prefix) for prefix in prefixes)
 
 
 class MainfluxProvisioner:
@@ -206,6 +250,7 @@ class MainfluxProvisioner:
         thing_key: str | None = None,
         dry_run: bool = False,
         allow_create: bool = True,
+        rule_set: str = "camera",
     ) -> ProvisioningResult:
         device_id = _validate_device_id(device_id)
         display_name = display_name.strip()
@@ -214,6 +259,7 @@ class MainfluxProvisioner:
         thing_id = thing_id.strip() if thing_id else None
         thing_key = thing_key.strip() if thing_key else None
         self._require_token()
+        rule_kinds, rule_builder = _rule_spec(rule_set)
 
         changes: list[str] = []
 
@@ -228,10 +274,12 @@ class MainfluxProvisioner:
                     "tools.add_device --provision-mainflux to create the device and "
                     "store its key safely."
                 )
-            self._preflight_orphan_rules(device_id)
+            self._preflight_orphan_rules(device_id, rule_kinds, rule_builder)
             existing_rule_state = None
         else:
-            existing_rule_state = self._analyze_rules(device_id, str(existing_thing["id"]))
+            existing_rule_state = self._analyze_rules(
+                device_id, str(existing_thing["id"]), rule_kinds, rule_builder
+            )
 
         profile = self._reconcile_profile(dry_run=dry_run, changes=changes)
         profile_id = str(profile["id"]) if profile is not None else None
@@ -260,11 +308,15 @@ class MainfluxProvisioner:
 
         resolved_thing_id = str(thing["id"])
         if existing_rule_state is None:
-            existing_rule_state = self._analyze_rules(device_id, resolved_thing_id)
+            existing_rule_state = self._analyze_rules(
+                device_id, resolved_thing_id, rule_kinds, rule_builder
+            )
         rule_ids = self._reconcile_rules(
             device_id,
             resolved_thing_id,
             existing_rule_state,
+            rule_kinds,
+            rule_builder,
             dry_run=dry_run,
             changes=changes,
         )
@@ -278,7 +330,9 @@ class MainfluxProvisioner:
                 thing_id=resolved_thing_id,
                 profile_id=str(profile_id),
             )
-            self._verify_rules(device_id, resolved_thing_id, rule_ids)
+            self._verify_rules(
+                device_id, resolved_thing_id, rule_ids, rule_kinds, rule_builder
+            )
             status = (
                 "created"
                 if any(change.startswith("created:") for change in changes)
@@ -706,51 +760,57 @@ class MainfluxProvisioner:
                 assignments.add(str(item))
         return assignments
 
-    def _preflight_orphan_rules(self, device_id: str) -> None:
+    def _preflight_orphan_rules(self, device_id: str, rule_kinds, rule_builder) -> None:
         by_name = self._rules_by_name(self._list_rules())
-        for kind in RULE_KINDS:
-            name = _rule_name(device_id, kind)
-            matches = by_name.get(name, [])
+        desired_rules = rule_builder(device_id, "preflight")
+        for kind, desired in zip(rule_kinds, desired_rules):
+            names = (str(desired["name"]), *_legacy_rule_names(device_id, kind))
+            matches = [item for name in names for item in by_name.get(name, [])]
             if len(matches) > 1:
-                raise ProvisioningError(f"duplicate Mainflux rules named {name}")
+                raise ProvisioningError(f"duplicate Mainflux rules for {desired['name']}")
             if matches:
                 description = str(matches[0].get("description") or "")
-                if not description.startswith(_managed_rule_prefix(device_id)):
-                    raise ProvisioningError(f"Mainflux rule {name} is unmanaged")
+                if not _is_managed_rule_description(description, device_id, rule_builder):
+                    raise ProvisioningError(f"Mainflux rule {desired['name']} is unmanaged")
                 raise ProvisioningError(
-                    f"managed Mainflux rule {name} exists without a matching Thing"
+                    f"managed Mainflux rule {desired['name']} exists without a matching Thing"
                 )
 
     def _analyze_rules(
-        self, device_id: str, thing_id: str
+        self, device_id: str, thing_id: str, rule_kinds, rule_builder
     ) -> dict[str, tuple[dict[str, Any] | None, set[str]]]:
         rules = self._list_rules()
         by_name = self._rules_by_name(rules)
-        expected_names = {_rule_name(device_id, kind) for kind in RULE_KINDS}
+        desired_rules = rule_builder(device_id, thing_id)
+        expected_names = {str(rule["name"]) for rule in desired_rules}
+        recognized_names = set(expected_names)
+        for kind in rule_kinds:
+            recognized_names.update(_legacy_rule_names(device_id, kind))
         assignments_by_id: dict[str, set[str]] = {}
         for rule in rules:
             rule_id = str(rule.get("id") or "")
             assignments = self._rule_assignments(rule)
             assignments_by_id[rule_id] = assignments
             rule_name = str(rule.get("name") or "unnamed")
-            if rule_name not in expected_names and thing_id in assignments:
+            if rule_name not in recognized_names and thing_id in assignments:
                 raise ProvisioningError(
                     f"legacy or foreign Mainflux rule '{rule_name}' is assigned to "
                     f"device {device_id}; explicitly migrate or unassign that Thing "
                     "before provisioning per-device rules. No assignment was changed."
                 )
         state: dict[str, tuple[dict[str, Any] | None, set[str]]] = {}
-        for kind, desired in zip(RULE_KINDS, build_rules(device_id, thing_id)):
+        for kind, desired in zip(rule_kinds, desired_rules):
             name = str(desired["name"])
-            matches = by_name.get(name, [])
+            names = (name, *_legacy_rule_names(device_id, kind))
+            matches = [item for candidate in names for item in by_name.get(candidate, [])]
             if len(matches) > 1:
-                raise ProvisioningError(f"duplicate Mainflux rules named {name}")
+                raise ProvisioningError(f"duplicate Mainflux rules for {name}")
             if not matches:
                 state[kind] = (None, set())
                 continue
             existing = matches[0]
             description = str(existing.get("description") or "")
-            if not description.startswith(_managed_rule_prefix(device_id)):
+            if not _is_managed_rule_description(description, device_id, rule_builder):
                 raise ProvisioningError(f"Mainflux rule {name} is unmanaged")
             rule_id = str(existing.get("id") or "")
             if not rule_id:
@@ -769,14 +829,16 @@ class MainfluxProvisioner:
         device_id: str,
         thing_id: str,
         state: dict[str, tuple[dict[str, Any] | None, set[str]]],
+        rule_kinds,
+        rule_builder,
         *,
         dry_run: bool,
         changes: list[str],
     ) -> dict[str, str]:
-        desired_rules = dict(zip(RULE_KINDS, build_rules(device_id, thing_id)))
-        missing = [desired_rules[kind] for kind in RULE_KINDS if state[kind][0] is None]
+        desired_rules = dict(zip(rule_kinds, rule_builder(device_id, thing_id)))
+        missing = [desired_rules[kind] for kind in rule_kinds if state[kind][0] is None]
         if missing:
-            for kind in RULE_KINDS:
+            for kind in rule_kinds:
                 if state[kind][0] is None:
                     changes.append(f"created:rule:{kind}")
             if not dry_run:
@@ -786,7 +848,7 @@ class MainfluxProvisioner:
                     json={"rules": missing},
                 )
 
-        for kind in RULE_KINDS:
+        for kind in rule_kinds:
             existing, assignments = state[kind]
             if existing is None:
                 continue
@@ -815,18 +877,20 @@ class MainfluxProvisioner:
                 if existing is not None
             }
 
-        verified_state = self._analyze_rules(device_id, thing_id)
+        verified_state = self._analyze_rules(
+            device_id, thing_id, rule_kinds, rule_builder
+        )
         rule_ids: dict[str, str] = {}
-        for kind in RULE_KINDS:
+        for kind in rule_kinds:
             existing, assignments = verified_state[kind]
             if existing is None or assignments != {thing_id}:
                 raise ProvisioningError(
-                    f"Mainflux rule {_rule_name(device_id, kind)} failed verification"
+                    f"Mainflux rule {desired_rules[kind]['name']} failed verification"
                 )
             desired = desired_rules[kind]
             if self._rule_needs_update(existing, desired):
                 raise ProvisioningError(
-                    f"Mainflux rule {_rule_name(device_id, kind)} failed semantic verification"
+                    f"Mainflux rule {desired['name']} failed semantic verification"
                 )
             rule_ids[kind] = str(existing["id"])
         return rule_ids
@@ -938,11 +1002,16 @@ class MainfluxProvisioner:
             )
 
     def _verify_rules(
-        self, device_id: str, thing_id: str, expected_ids: Mapping[str, str]
+        self,
+        device_id: str,
+        thing_id: str,
+        expected_ids: Mapping[str, str],
+        rule_kinds,
+        rule_builder,
     ) -> None:
-        state = self._analyze_rules(device_id, thing_id)
-        desired_rules = dict(zip(RULE_KINDS, build_rules(device_id, thing_id)))
-        for kind in RULE_KINDS:
+        state = self._analyze_rules(device_id, thing_id, rule_kinds, rule_builder)
+        desired_rules = dict(zip(rule_kinds, rule_builder(device_id, thing_id)))
+        for kind in rule_kinds:
             existing, assignments = state[kind]
             if (
                 existing is None
@@ -951,7 +1020,7 @@ class MainfluxProvisioner:
                 or self._rule_needs_update(existing, desired_rules[kind])
             ):
                 raise ProvisioningError(
-                    f"Mainflux rule {_rule_name(device_id, kind)} failed final verification"
+                    f"Mainflux rule {desired_rules[kind]['name']} failed final verification"
                 )
 
 
@@ -963,5 +1032,6 @@ __all__ = [
     "build_profile",
     "build_profile_create_payload",
     "build_rules",
+    "build_pentest_rules",
     "profile_is_current",
 ]

@@ -9,6 +9,7 @@ from urllib.parse import quote
 from camera_agent.camera import ADBCamera, RTSPCamera, WebcamCamera, WindowCamera
 from camera_agent.config import redact_url
 from camera_agent.device_registry import validate_device_spec
+from camera_agent.pentest import PentestScanner, PentestTarget
 
 
 class DeviceCheckError(RuntimeError):
@@ -23,6 +24,7 @@ class SourceCheckResult:
     width: int | None = None
     height: int | None = None
     safe_source: str | None = None
+    findings: int = 0
 
 
 def check_device(
@@ -39,6 +41,23 @@ def check_device(
     if not device["enabled"]:
         return SourceCheckResult(device["device_id"], device["source_type"], False)
 
+    if device["source_type"] == "pentest":
+        source = device["source"]
+        target = _pentest_target(device)
+        report = PentestScanner(target).scan()
+        if not report.scan_ok:
+            raise DeviceCheckError(
+                f"Pentest target check failed for {device['device_id']}: "
+                f"{report.error_code or 'target unavailable'}"
+            )
+        return SourceCheckResult(
+            device["device_id"],
+            device["source_type"],
+            True,
+            safe_source=f"pentest:{target.host}",
+            findings=len(report.findings),
+        )
+
     factory = camera_factory or build_candidate_camera
     camera = factory(device, secrets)
     with camera:
@@ -51,6 +70,16 @@ def check_device(
     height, width = packet.frame.shape[:2]
     if width < 1 or height < 1:
         raise DeviceCheckError(f"Source check returned an empty frame for {device['device_id']}")
+
+    findings = 0
+    if device.get("agent_type", "camera") == "pentest":
+        report = PentestScanner(_pentest_target(device)).scan()
+        if not report.scan_ok:
+            raise DeviceCheckError(
+                f"Pentest target check failed for {device['device_id']}: "
+                f"{report.error_code or 'target unavailable'}"
+            )
+        findings = len(report.findings)
     return SourceCheckResult(
         device["device_id"],
         device["source_type"],
@@ -58,6 +87,31 @@ def check_device(
         width=width,
         height=height,
         safe_source=camera.safe_url,
+        findings=findings,
+    )
+
+
+def _pentest_target(device: Mapping[str, Any]) -> PentestTarget:
+    source = device["source"]
+    config = source if device["source_type"] == "pentest" else device["pentest"]
+    target_host = config.get("target_host")
+    if config.get("target_from_source"):
+        target_host = source.get("host")
+    if not target_host:
+        raise DeviceCheckError("Pentest target host is not configured")
+    return PentestTarget(
+        host=target_host,
+        ports=tuple(config["ports"]),
+        http_scheme=config.get("http_scheme"),
+        http_port=config.get("http_port"),
+        http_path=config.get("http_path", "/"),
+        connect_timeout=float(config.get("connect_timeout", 3.0)),
+        request_timeout=float(config.get("request_timeout", 5.0)),
+        verify_tls=bool(config.get("verify_tls", True)),
+        allow_public_target=bool(config.get("allow_public_target", False)),
+        rtsp_probe=bool(config.get("rtsp_probe", False)),
+        http_options_probe=bool(config.get("http_options_probe", False)),
+        tls_assessment=bool(config.get("tls_assessment", False)),
     )
 
 
