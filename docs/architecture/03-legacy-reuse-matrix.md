@@ -14,7 +14,9 @@ Tài liệu này trả lời nhanh câu hỏi “được dùng lại phần nà
 | Alarm vật lý Tapo | `camera_agent/physical_alarm.py` | Optional actuator, tách khỏi RTSP/Mainflux |
 | Mainflux telemetry | `mainflux.py` + `outbox.py` | SenML; outbox phân vùng theo device + destination |
 | Control/PTZ UI | `tools/control_server.py` + `control.py` | Loopback-only; server không tự chạy agent |
-| Central MQTT desired state | `mainflux_control.py` + `tools/control_server.py` | Per-device Mainflux channel, SQLite generation/ACK; không remote code |
+| Feature runtime của agent | `features.py` + `application.py` | Mỗi agent chạy một feature tại một thời điểm; nhiều agent có thể chạy đồng thời |
+| Local desired state/control | `mainflux_control.py` + `control.py` + `tools/control_server.py` | SQLite generation/ACK và command queue; không cần MQTT channel cho local PC |
+| Central MQTT desired state | `mainflux_control.py` + `tools/control_server.py` | Tuỳ chọn khi deployment có Mainflux control channel; không remote code |
 | Person Guard | `vision.py` + `person_guard.py` | YOLO COCO local hash-verified, anonymous largest person box, outbox-first alert |
 | PTZ arbitration | `ptz.py` `PTZArbiter` | Serialize manual, Facebook patrol, Person Guard; switch/Stop hủy motion cũ |
 
@@ -24,7 +26,8 @@ Tài liệu này trả lời nhanh câu hỏi “được dùng lại phần nà
 manifest v2 -> source factory -> latest frame -> detector/classifier
              -> decision/rule local -> SenML/outbox -> Mainflux
 control UI -> SQLite command queue -> agent worker -> ONVIF PTZ
-central UI -> desired-state SQLite -> Mainflux MQTT private channel -> agent ACK
+local UI -> desired-state SQLite/command queue -> agent ACK
+central UI -> desired-state SQLite -> Mainflux MQTT private channel -> agent ACK (tuỳ chọn)
 ```
 
 Không reverse-engineer P2P, không chia sẻ Thing key/Thing ID/state giữa device. Khi một adapter

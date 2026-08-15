@@ -20,19 +20,38 @@ này không ngắt thiết bị, không sửa `.env`, không xóa model/dataset/
 xóa tài nguyên Mainflux hiện hữu.
 
 Tapo physical siren là actuator thử nghiệm riêng, không phải một phần của RTSP. Nếu bật rõ trong
-manifest, agent sẽ cố gọi local Tapo API khi rule Facebook tạo edge event; một số firmware C200 có
+manifest, agent sẽ cố gọi local Tapo API khi Facebook hoặc Person Guard tạo edge event; một số firmware C200 có
 thể từ chối manual siren control.
 
-## Trạng thái xác minh ngày 2026-08-14
+## Mục tiêu và tiền đề
+
+Đề tài hướng tới một hệ thống agent số đa thiết bị, trong đó mỗi camera được gắn với một agent
+để thực hiện một nhiệm vụ đã được lập trình. Một agent chỉ chạy một feature tại một thời điểm,
+nhưng nhiều agent có thể hoạt động đồng thời trên nhiều thiết bị.
+
+Các bài toán lớn cần giải quyết gồm:
+
+- **Agents – Camera:** agent có thể kết nối với camera, thực hiện nhiệm vụ, gửi trạng thái và
+  điều khiển thiết bị khi được cấp quyền.
+- **Nền tảng quản lý – Mainflux:** nền tảng có thể tiếp nhận dữ liệu, quản lý thiết bị và hỗ trợ
+  theo dõi các sự kiện từ agent.
+- **Máy tính:** máy tính có thể cung cấp môi trường, tài nguyên và kết nối cần thiết để chạy
+  nhiều agent, đồng thời cho phép bổ sung feature mới khi hệ thống mở rộng.
+
+## Trạng thái xác minh ngày 2026-08-15
 
 - Manifest canonical đã là schema v2 generic; v1 bị từ chối rõ ràng.
 - Runtime không còn nhánh theo `office-01`, `hvip01`, C200 hay ONE Home trong `agent.py` và
   `camera_agent/`.
 - Onboarding, registry transaction, source preflight, provisioning idempotent, rule isolation,
   inference serialization và durable outbox đều có unit test không dùng secret/camera thật.
-- Regression trước rollout: `175/175` unittest PASS và `compileall` PASS; `agent.py --check-config`
-  cần chạy lại sau khi operator điền UUID/channel Mainflux thật.
+- Regression hiện tại: `177/177` unittest PASS, `compileall` PASS và `agent.py --check-config` PASS.
 - `config/devices.yaml` hiện có một device enabled: `yume-1`.
+- `yume-1` đã bật thử nghiệm physical alarm Tapo với custom audio `8196`; lệnh kiểm tra không có
+  `--yes` chỉ xác minh target, không phát âm thanh.
+- Control local dùng SQLite nên có thể vận hành không cần Mainflux channel control. Desired feature
+  được phát lại sau khi agent khởi động lại; MQTT control là lựa chọn mở rộng khi deployment đã có
+  controller Thing và control channel.
 - Đã chạy ONVIF probe read-only cho `yume-1` và phát hiện Profile S; không chạy movement vật lý
   trong probe, không đăng nhập/provision Mainflux và không tạo/xóa remote resource. Movement thật
   chỉ dùng lệnh có `--yes` sau khi operator xác nhận.
@@ -65,7 +84,7 @@ devices.yaml v2 + environment references
 
 Mỗi device có reader/reconnect, decision engine, local rule engine, publisher, Thing key và
 outbox partition riêng. Chỉ model nặng được dùng chung; cả detector lẫn classifier chạy tuần tự
-để phù hợp i5-8250U/8 GB.
+để tối ưu tài nguyên phần cứng.
 
 Mã state không đổi:
 
@@ -587,7 +606,8 @@ phần, không nhận diện mặt/danh tính và không lưu hoặc gửi frame
 re-arm sau 3 giây không thấy người. Alarm event luôn đi vào SQLite outbox trước HTTP Mainflux; còi
 vật lý chỉ chạy nếu `physical_alarm` của chính camera đã opt-in.
 
-Khi Auto ON trong Person Guard, camera chỉ theo tâm của box lớn nhất: dead-zone 15%, ưu tiên trục
+Khi Auto ON trong Person Guard, đây là **tracking**, không phải patrol đi tìm người. Camera chỉ theo
+tâm của box lớn nhất: dead-zone 15%, ưu tiên trục
 lệch lớn hơn, segment tối đa 0.25 s và cách nhau tối thiểu 0.5 s. Không thấy người thì dừng motion;
 không dùng patrol để tìm người. PTZ arbiter tuần tự hóa manual move, Facebook patrol và Person
 Guard; Stop, standby hoặc switch feature sẽ hủy motion cũ trước.
@@ -612,7 +632,7 @@ control: # chỉ cần ở hub khi preview của agent khác host
   preview_token_env: CAMERA_AGENT_LOBBY_01_PREVIEW_TOKEN
 ```
 
-MQTT dùng channel riêng cho từng device và topic chuẩn Mainflux
+Trong deployment có MQTT, MQTT dùng channel riêng cho từng device và topic chuẩn Mainflux
 `channels/<control_channel_id>/messages/camera-agent/{desired,status,command}/<device_id>`.
 Controller Thing và agent Thing là hai member duy nhất của channel. MQTT username là Thing ID,
 password là Thing key; bắt buộc TLS qua VPN tin cậy. Desired state được hub ghi SQLite kèm
@@ -767,11 +787,13 @@ giữ `auto_patrol.enabled: false`. Sau đó probe không di chuyển camera:
    `agent.py` đang chạy và dùng chung thư mục project thì lệnh mới chuyển từ trạng thái `pending`
    sang `executed`.
 
-6. Khi Auto ON, agent di chuyển theo các bước ONVIF hữu hạn đến khi phát hiện một màn hình. Nó
+6. Khi Auto ON với `facebook_monitor`, agent di chuyển theo các bước ONVIF hữu hạn đến khi phát hiện một màn hình. Nó
 dừng và quan sát 5 giây. Nếu không có Facebook rule event, nó chuyển góc nhìn. Nếu Facebook còn
 active, rule local phải có cooldown đúng 3 giây; agent phát tối đa ba event/alarm rồi chuyển góc
 nhìn bất kể kết quả tiếp theo. Auto không đảm bảo đây là một màn hình vật lý khác vì camera chỉ
 có tín hiệu hình ảnh, không có định vị không gian.
+
+Với `person_guard`, Auto chỉ theo dõi người đã được phát hiện; nó không tự quay tuần tra để tìm người.
 
 Patrol hiện dùng sweep theo hàng `RIGHT ×3 -> DOWN -> LEFT ×3 -> DOWN`, với manifest `yume-1`
 đặt `velocity: 0.55`, `move_duration_seconds: 2.0` và `search_move_interval_seconds: 2.2`.
@@ -823,8 +845,8 @@ sang destination mới.
 
 ## Model, dữ liệu và quyền riêng tư
 
-- Default `PROCESS_INTERVAL=1.0`, `DETECTOR_IMAGE_SIZE=416`, `TORCH_THREADS=2` phù hợp máy mục
-  tiêu; bắt đầu với tối đa hai nguồn rồi theo dõi CPU/RAM/`inference_ms`.
+- Cấu hình `PROCESS_INTERVAL=1.0`, `DETECTOR_IMAGE_SIZE=416`, `TORCH_THREADS=2` có thể điều chỉnh
+  linh hoạt theo năng lực phần cứng máy chạy; bắt đầu với tối đa hai nguồn rồi theo dõi CPU/RAM/`inference_ms`.
 - Static ROI giúp giảm YOLO cost nhưng phải được calibrate từ full frame thật.
 - Production classifier phải có ba lớp. Historical validation của một device/session không chứng
   minh khả năng tổng quát cho camera mới.
@@ -875,8 +897,8 @@ models/ và data/                 tài sản production/training, không bị th
 .\.venv\Scripts\python.exe agent.py --check-config
 ```
 
-Gate trước rollout Person Guard: **175/175 test PASS**, `compileall` PASS; config-check production
-cần pass sau khi điền UUID/channel Mainflux thật.
+Gate trước rollout Person Guard: **177/177 test PASS**, `compileall` PASS và `agent.py --check-config`
+PASS. Kiểm tra Mainflux publish thực tế vẫn phụ thuộc route của deployment đang dùng.
 1/1 entry hiện hữu enabled. Các gate này không mở camera và không mutate Mainflux.
 
 ## Monitor Windows và C200 custom audio
@@ -890,9 +912,9 @@ Start-Process .\dist\CameraAgentMonitor.exe
 ```
 
 Monitor chỉ hiển thị `State`, `Score`, `Rule` và trạng thái Mainflux; không hiển thị pixel camera.
-Khi state là `FACEBOOK_DETECTED`, local rule gửi `rule_violation_event`, Mainflux tạo Alarm và
-physical alarm gọi custom audio trên C200. Rule Facebook và physical alarm của `yume-1` hiện cùng
-dùng cooldown 3 giây; `audio_id: 8196` phải tồn tại trong Tapo app.
+Khi state là `FACEBOOK_DETECTED` hoặc Person Guard xác nhận có người, local rule gửi event,
+Mainflux có thể tạo Alarm và physical alarm gọi custom audio trên C200. Rule Facebook và physical
+alarm của `yume-1` hiện cùng dùng cooldown 3 giây; `audio_id: 8196` phải tồn tại trong Tapo app.
 
 Nếu cần rebuild executable sau khi sửa `tools/monitor.py`:
 

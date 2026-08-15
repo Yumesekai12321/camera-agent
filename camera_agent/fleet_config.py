@@ -140,6 +140,8 @@ PERSON_GUARD_KEYS = {
     "tracking_dead_zone",
     "tracking_move_duration_seconds",
     "tracking_move_interval_seconds",
+    "search_move_interval_seconds",
+    "search_move_duration_seconds",
 }
 CONTROL_KEYS = {"preview_url_env", "preview_token_env"}
 
@@ -1030,6 +1032,14 @@ def _resolve_features(raw: Any, *, context: str) -> dict[str, Any]:
                 tracking_move_interval_seconds=_number_value(
                     raw_person.get("tracking_move_interval_seconds", 0.5),
                     f"{context}.person_guard.tracking_move_interval_seconds",
+                ),
+                search_move_interval_seconds=_number_value(
+                    raw_person.get("search_move_interval_seconds", 2.0),
+                    f"{context}.person_guard.search_move_interval_seconds",
+                ),
+                search_move_duration_seconds=_number_value(
+                    raw_person.get("search_move_duration_seconds", 0.5),
+                    f"{context}.person_guard.search_move_duration_seconds",
                 ),
             )
             person_config.validate()

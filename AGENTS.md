@@ -37,8 +37,8 @@ khai. Không đọc/in `.env` thật khi không cần thiết.
   credential hay frame.
 - Full preview phải fit toàn bộ frame đúng tỉ lệ, không crop/stretch. Compact preview và fleet
   dashboard không được chứa pixel camera vì đây là hàng rào chống mirror reflection.
-- Mặc định phải phù hợp i5-8250U/8 GB: inference khoảng 1 Hz và 2 torch threads. YOLO và
-  classifier nặng dùng chung trong fleet và tất cả inference phải qua cùng một lock tuần tự.
+- Tối ưu hiệu năng: hỗ trợ đa dạng cấu hình phần cứng; YOLO và classifier nặng dùng chung trong fleet
+  và inference chạy qua lock tuần tự để đảm bảo tính ổn định tài nguyên.
 - Classifier production phải có đủ `facebook_active`, `facebook_mention`, `other`. Nếu thiếu
   `other`, chỉ cảnh báo degraded; không được tuyên bố accuracy production.
 - Dataset raw/model là tài sản. Không xóa hoặc ghi đè khi chưa có output candidate và validation
@@ -154,7 +154,9 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 
 ## Cập nhật runtime hiện tại
 
-- Central control dùng desired-state SQLite trên hub và MQTT Mainflux qua TLS/VPN. Topic phải theo
+- Central control local dùng desired-state SQLite và command queue; MQTT Mainflux qua TLS/VPN là
+  lựa chọn mở rộng khi deployment đã provision controller/control channel. Nếu không có MQTT,
+  desired state vẫn được replay sau khi agent restart. Khi dùng MQTT, topic phải theo
   `channels/<control_channel_id>/messages/camera-agent/...`; MQTT username là Thing ID, password là
   Thing key. Mỗi control channel chỉ có controller Thing và agent Thing. Không dùng MQTT để tải code,
   model, frame hay token browser; agent chỉ nhận schema desired-state/typed PTZ allow-list.
@@ -165,13 +167,15 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
   auto-download runtime, identity/face recognition, lưu frame hay gửi pixel. Confirm 2 frame,
   re-arm sau 3 giây absent; event phải SQLite outbox-first. PTZ tracking chỉ largest box, segment
   <=0.25s, interval >=0.5s và qua `PTZArbiter`; switch/standby/Stop hủy motion cũ.
-- `mainflux.channel_id` cho HTTP telemetry route `/http/channels/<id>/messages`; `control_channel_id`
+- `mainflux.channel_id` nếu deployment có telemetry channel sẽ dùng route `/http/channels/<id>/messages`;
+  `control_channel_id`
   là private control route. Route cũ `/http/messages` đã xác minh mismatch ở deployment cũ, không
   đưa production lên nếu chưa điền UUID và pass `tools.check_mainflux` + `tools.check_mainflux_control`.
 
 - `yume-1` đang dùng RTSP `172.16.7.62:554/stream1` và ONVIF `2020`; probe ONVIF read-only đã PASS.
-- PTZ manual/auto chạy worker riêng; auto quét `RIGHT ×3 -> DOWN -> LEFT ×3 -> DOWN`, manifest hiện
-  dùng `velocity: 0.55`, `move_duration_seconds: 2.0`, interval `2.2`.
+- PTZ manual/auto chạy worker riêng. Facebook Auto patrol quét `RIGHT ×3 -> DOWN -> LEFT ×3 -> DOWN`,
+  manifest hiện dùng `velocity: 0.55`, `move_duration_seconds: 2.0`, interval `2.2`; Person Guard
+  Auto chỉ tracking người đã phát hiện, không patrol đi tìm người.
 - Control server không phải agent. Chạy một `agent.py` và một `python -m tools.control_server`; agent
   heartbeat giúp UI trả `503 agent offline` thay vì queue vô hạn. Preview web phải opt-in bằng
   `agent.py --web-preview --no-preview` và chỉ giữ một JPEG local.
@@ -188,9 +192,9 @@ Mọi module trong `tools/` phải chạy bằng `python -m tools.<module>`.
 - `tools/monitor.py` phải tìm được project root khi chạy từ source hoặc PyInstaller executable,
   truyền manifest tuyệt đối và dùng `.venv\Scripts\python.exe` nếu tồn tại. Monitor không được hiển
   thị pixel camera.
-- Regression gate trước rollout Person Guard (2026-08-14): `175/175` unittest PASS và `compileall`
-  PASS. `agent.py --check-config` phải chạy lại sau khi operator điền UUID/channel Mainflux thật;
-  không coi path `/http/messages` legacy là production-ready.
+- Regression gate trước rollout Person Guard (2026-08-15): `177/177` unittest PASS, `compileall` PASS
+  và `agent.py --check-config` PASS. `/http/messages` vẫn phụ thuộc deployment Mainflux hiện tại;
+  không coi publish thực tế là production-ready nếu chưa pass đúng route.
 
 ## Tài liệu, bảo mật và vận hành
 

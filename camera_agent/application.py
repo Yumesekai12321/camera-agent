@@ -16,7 +16,7 @@ from .config import Settings
 from .decision import AgentState, Decision, DecisionEngine
 from .mainflux import MainfluxError, MainfluxPublisher, Telemetry
 from .physical_alarm import NoopPhysicalAlarm, PhysicalAlarm
-from .auto_patrol import AutoPatrol, AutoPatrolConfig, PatrolAction
+from .auto_patrol import AutoPatrol, AutoPatrolConfig, BoundedRandomSearch, PatrolAction
 from .control import CommandStore
 from .features import DesiredFeatureState, FeatureError, FeatureId, FeatureRuntime
 from .local_preview import LocalPreviewStore
@@ -24,7 +24,14 @@ from .person_guard import PersonEvaluation, PersonGuard
 from .presence import AgentPresence
 from .ptz import NoopPTZ, PTZArbiter, PTZController, PTZError, PTZMove
 from .rules import MonitoringRuleEngine, RuleEvaluation, RulesConfig, RuleStatus
-from .vision import ComputerScreenDetector, FacebookClassifier, PersonDetector, ScreenExtraction
+from .vision import (
+    ComputerScreenDetector,
+    Detection,
+    FacebookClassifier,
+    PersonDetector,
+    ScreenExtraction,
+    screen_centering_move,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -332,6 +339,7 @@ class CameraAgent:
         feature_runtime: FeatureRuntime | None = None,
         person_detector: PersonDetector | None = None,
         person_guard: PersonGuard | None = None,
+        search_explorer: BoundedRandomSearch | None = None,
         command_store: CommandStore | None = None,
         local_preview: LocalPreviewStore | None = None,
         presence: AgentPresence | None = None,
@@ -378,6 +386,7 @@ class CameraAgent:
         self.ptz = ptz or NoopPTZ()
         self.ptz_arbiter = PTZArbiter(self.ptz)
         self.auto_patrol = auto_patrol or AutoPatrol(AutoPatrolConfig())
+        self.search_explorer = search_explorer or BoundedRandomSearch()
         self.feature_runtime = feature_runtime or FeatureRuntime(
             allowed={FeatureId.FACEBOOK_MONITOR},
             initial_feature=FeatureId.FACEBOOK_MONITOR,
@@ -393,22 +402,6 @@ class CameraAgent:
             max_height=settings.preview_max_height,
         )
         self.presence = presence or AgentPresence()
-        # Sweep horizontally across a row before stepping vertically.  The
-        # former R/D/L/U cycle made a tiny square and revisited nearly the same
-        # view, which is especially noticeable on cameras with a narrow PTZ
-        # velocity range.
-        self._patrol_directions = cycle(
-            (
-                PTZMove.RIGHT,
-                PTZMove.RIGHT,
-                PTZMove.RIGHT,
-                PTZMove.DOWN,
-                PTZMove.LEFT,
-                PTZMove.LEFT,
-                PTZMove.LEFT,
-                PTZMove.DOWN,
-            )
-        )
         self.publisher = MainfluxPublisher(
             enabled=settings.mainflux_enabled and not dry_run,
             url=settings.mainflux_messages_url,
@@ -458,9 +451,12 @@ class CameraAgent:
                     else:
                         self.auto_patrol.set_enabled(False)
                         self._person_auto_enabled = enabled
-                        mode = "person tracking (waits for a qualified person)"
+                        if enabled:
+                            self.person_guard.reset_search_timer()
+                        mode = "person tracking & search"
                     if not enabled:
                         self.ptz_arbiter.stop(force=True)
+                        self.search_explorer.reset()
                     detail = (
                         f"auto={'on' if enabled else 'off'}"
                         if not enabled
@@ -538,17 +534,39 @@ class CameraAgent:
     def _control_worker(self, stop_event: threading.Event) -> None:
         """Poll the local command queue independently of inference.
 
-        Inference can take hundreds of milliseconds on an i5-class machine;
-        keeping queue polling in that loop made manual PTZ feel laggy.  The
-        queue is durable, so a short polling interval is safe and commands are
-        still claimed atomically per device.
+        Inference can take noticeable time depending on workload; keeping queue
+        polling in a dedicated thread keeps manual PTZ and auto switching responsive.
+        The queue is durable, so a short polling interval is safe and commands are
+        claimed atomically per device.
         """
         while not stop_event.is_set() and not self.stop_event.is_set():
             self._process_control_commands()
-            stop_event.wait(0.05)
+            stop_event.wait(0.03)
 
-    def _apply_auto_patrol(self, *, screen_detected: bool, alarm_event: bool) -> None:
+    def _apply_auto_patrol(
+        self,
+        *,
+        screen_detected: bool,
+        alarm_event: bool,
+        detection: Detection | None = None,
+    ) -> None:
         try:
+            if self.auto_patrol.enabled and screen_detected and detection is not None:
+                centering_move = screen_centering_move(detection)
+                if centering_move is not None:
+                    # Nudge PTZ to center and maximize the screen in frame
+                    self.ptz_arbiter.start(
+                        "facebook_patrol",
+                        centering_move,
+                        duration_seconds=0.25,
+                    )
+                    LOGGER.info(
+                        "[%s] Auto patrol centering screen candidate: %s",
+                        self.device_id,
+                        centering_move.value,
+                    )
+                    return
+
             actions = self.auto_patrol.observe(
                 screen_detected=screen_detected,
                 alarm_event=alarm_event,
@@ -557,11 +575,13 @@ class CameraAgent:
                 if action == PatrolAction.STOP:
                     self.ptz_arbiter.stop("facebook_patrol", force=False)
                 elif action == PatrolAction.MOVE_NEXT:
-                    # ONVIF start() is non-blocking; inference remains live and
-                    # a detected screen can interrupt the segment immediately.
-                    self.ptz_arbiter.start("facebook_patrol", next(self._patrol_directions))
+                    # Non-blocking stochastic bounded search move.
+                    direction = self.search_explorer.next_direction()
+                    self.ptz_arbiter.start("facebook_patrol", direction)
                     LOGGER.info(
-                        "[%s] Auto patrol moving to next view", self.device_id
+                        "[%s] Auto patrol moving to next view: %s",
+                        self.device_id,
+                        direction.value,
                     )
         except PTZError as exc:
             # Do not keep repeatedly moving after a camera/PTZ failure.
@@ -749,20 +769,34 @@ class CameraAgent:
         evaluation = self.person_guard.observe(detection)
         tracking = bool(self._person_auto_enabled and evaluation.present)
         try:
-            direction = self.person_guard.next_tracking_move(
-                detection, auto_enabled=self._person_auto_enabled
-            )
-            if direction is not None:
-                self.ptz_arbiter.start(
-                    "person_guard",
-                    direction,
-                    duration_seconds=self.person_guard.config.tracking_move_duration_seconds,
-                )
-            elif detection is None:
-                # Never leave a stale tracking segment running once the current
-                # frame has no target, even while the 3-second alert re-arm
-                # timer still reports the prior presence state.
-                self.ptz_arbiter.stop("person_guard", force=False)
+            if self._person_auto_enabled:
+                if evaluation.present and detection is not None:
+                    direction = self.person_guard.next_tracking_move(
+                        detection, auto_enabled=True
+                    )
+                    if direction is not None:
+                        self.ptz_arbiter.start(
+                            "person_guard",
+                            direction,
+                            duration_seconds=self.person_guard.config.tracking_move_duration_seconds,
+                        )
+                    else:
+                        self.ptz_arbiter.stop("person_guard", force=False)
+                elif detection is None and not evaluation.present:
+                    if self.person_guard.should_search_move(auto_enabled=True):
+                        direction = self.search_explorer.next_direction()
+                        self.ptz_arbiter.start(
+                            "person_guard",
+                            direction,
+                            duration_seconds=self.person_guard.config.search_move_duration_seconds,
+                        )
+                        LOGGER.info(
+                            "[%s] Person Guard search move: %s",
+                            self.device_id,
+                            direction.value,
+                        )
+                else:
+                    self.ptz_arbiter.stop("person_guard", force=False)
         except PTZError as exc:
             self._person_auto_enabled = False
             self.ptz_arbiter.stop(force=True)
@@ -1055,6 +1089,7 @@ class CameraAgent:
                         extraction.computer_detected and extraction.screen is not None
                     ),
                     alarm_event=rule.event_triggered,
+                    detection=extraction.detection,
                 )
 
                 self.preview.show(

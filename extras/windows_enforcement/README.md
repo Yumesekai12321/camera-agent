@@ -31,6 +31,12 @@ Script tạo backup ban đầu ở
 > [docs/SESSION_HANDOFF.md](../../docs/SESSION_HANDOFF.md) trước khi tích hợp webhook hoặc thay đổi
 > policy; không tự bật module này từ `agent.py`.
 
+## Vị trí trong hệ thống
+
+Module này chỉ là một actuator tuỳ chọn trên máy tính Windows. Agent camera và Mainflux vẫn là
+hai thành phần độc lập: agent phát hiện sự kiện, Mainflux quản lý telemetry/Alarm, còn module này
+chỉ thay đổi chính sách chặn local khi có phê duyệt riêng.
+
 Person Guard và central desired-state không gọi module này. `person_guard` chỉ tạo Mainflux Alarm và
 còi camera đã opt-in; `none`/standby không được suy diễn thành Facebook event hoặc thay đổi `hosts`.
 Giữ module enforcement tách biệt, loopback-only và chỉ bật khi có phê duyệt riêng.

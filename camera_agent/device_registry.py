@@ -126,6 +126,8 @@ PERSON_GUARD_FIELDS = {
     "tracking_dead_zone",
     "tracking_move_duration_seconds",
     "tracking_move_interval_seconds",
+    "search_move_interval_seconds",
+    "search_move_duration_seconds",
 }
 CONTROL_FIELDS = {"preview_url_env", "preview_token_env"}
 PENTEST_FIELDS = {
@@ -974,6 +976,8 @@ def _validate_features(value: Any, *, agent_type: str, location: str) -> None:
             tracking_dead_zone=float(person.get("tracking_dead_zone", 0.15)),
             tracking_move_duration_seconds=float(person.get("tracking_move_duration_seconds", 0.25)),
             tracking_move_interval_seconds=float(person.get("tracking_move_interval_seconds", 0.5)),
+            search_move_interval_seconds=float(person.get("search_move_interval_seconds", 2.0)),
+            search_move_duration_seconds=float(person.get("search_move_duration_seconds", 0.5)),
         ).validate()
     except (TypeError, ValueError) as exc:
         raise RegistryValidationError(f"{location}.person_guard is invalid: {exc}") from exc

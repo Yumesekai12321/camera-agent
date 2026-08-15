@@ -65,6 +65,43 @@ class OnvifPTZTests(unittest.TestCase):
 
         fake_ptz.Stop.assert_called()
 
+    def test_seamless_continuous_motion_extension(self):
+        fake_camera = MagicMock()
+        fake_media = MagicMock()
+        profile = MagicMock()
+        profile.token = "profile-1"
+        profile.PTZConfiguration = MagicMock()
+        fake_media.GetProfiles.return_value = [profile]
+        fake_ptz = MagicMock()
+        fake_camera.create_media_service.return_value = fake_media
+        fake_camera.create_ptz_service.return_value = fake_ptz
+        module = MagicMock(ONVIFCamera=MagicMock(return_value=fake_camera))
+        ptz = OnvifPTZ("camera.example.test", 2020, "user", "pass", velocity=0.4)
+
+        started = threading.Event()
+        fake_ptz.ContinuousMove.side_effect = lambda _payload: started.set()
+        with patch("camera_agent.ptz.importlib.import_module", return_value=module):
+            # Start first segment
+            ptz.start(PTZMove.RIGHT, duration_seconds=1.0)
+            self.assertTrue(started.wait(1.0))
+            self.assertEqual(fake_ptz.ContinuousMove.call_count, 1)
+
+            # Extend in the same direction: should not call Stop or duplicate ContinuousMove
+            ptz.start(PTZMove.RIGHT, duration_seconds=1.0)
+            self.assertEqual(fake_ptz.ContinuousMove.call_count, 1)
+            fake_ptz.Stop.assert_not_called()
+
+            # Change direction in flight: seamlessly sends new ContinuousMove
+            ptz.start(PTZMove.UP, duration_seconds=1.0)
+            time.sleep(0.05)
+            self.assertEqual(fake_ptz.ContinuousMove.call_count, 2)
+            fake_ptz.Stop.assert_not_called()
+
+            # Now stop
+            ptz.stop()
+
+        fake_ptz.Stop.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()

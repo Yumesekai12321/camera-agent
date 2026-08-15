@@ -1,6 +1,15 @@
 import unittest
+import random
 
-from camera_agent.auto_patrol import AutoPatrol, AutoPatrolConfig, PatrolAction, PatrolPhase
+from camera_agent.auto_patrol import (
+    AutoPatrol,
+    AutoPatrolConfig,
+    BoundedRandomSearch,
+    BoundedSearchConfig,
+    PatrolAction,
+    PatrolPhase,
+)
+from camera_agent.ptz import PTZMove
 
 
 class AutoPatrolTests(unittest.TestCase):
@@ -72,6 +81,28 @@ class AutoPatrolTests(unittest.TestCase):
         patrol.set_enabled(False)
         self.assertFalse(patrol.enabled)
         self.assertEqual(patrol.phase, PatrolPhase.MANUAL)
+
+    def test_bounded_random_search_stays_within_limits(self):
+        rng = random.Random(12345)
+        config = BoundedSearchConfig(max_pan_steps=3, max_tilt_steps=1)
+        explorer = BoundedRandomSearch(config, rng=rng)
+
+        visited_moves = set()
+        for _ in range(300):
+            move = explorer.next_direction()
+            visited_moves.add(move)
+            pan, tilt = explorer.position
+            self.assertGreaterEqual(pan, -3)
+            self.assertLessEqual(pan, 3)
+            self.assertGreaterEqual(tilt, -1)
+            self.assertLessEqual(tilt, 1)
+
+        # Ensure all directions were explored
+        self.assertEqual(visited_moves, {PTZMove.LEFT, PTZMove.RIGHT, PTZMove.UP, PTZMove.DOWN})
+
+        # Test reset
+        explorer.reset()
+        self.assertEqual(explorer.position, (0, 0))
 
 
 if __name__ == "__main__":

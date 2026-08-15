@@ -9,20 +9,47 @@ from typing import Any
 import cv2
 import numpy as np
 
+from .ptz import PTZMove
+
 
 @dataclass(frozen=True)
 class Detection:
     box: tuple[int, int, int, int]
     confidence: float
     area: int
+    center_x: float = 0.5
+    center_y: float = 0.5
+    cut_left: bool = False
+    cut_right: bool = False
+    cut_top: bool = False
+    cut_bottom: bool = False
+
+
+def screen_centering_move(detection: Detection, *, dead_zone: float = 0.12) -> PTZMove | None:
+    """Compute directional move to center and maximize a partially captured screen."""
+    if detection.cut_left and not detection.cut_right:
+        return PTZMove.LEFT
+    if detection.cut_right and not detection.cut_left:
+        return PTZMove.RIGHT
+    if detection.cut_top and not detection.cut_bottom:
+        return PTZMove.UP
+    if detection.cut_bottom and not detection.cut_top:
+        return PTZMove.DOWN
+
+    delta_x = detection.center_x - 0.5
+    delta_y = detection.center_y - 0.5
+    if max(abs(delta_x), abs(delta_y)) <= dead_zone:
+        return None
+    if abs(delta_x) >= abs(delta_y):
+        return PTZMove.RIGHT if delta_x > 0 else PTZMove.LEFT
+    return PTZMove.DOWN if delta_y > 0 else PTZMove.UP
 
 
 @dataclass(frozen=True)
 class PersonDetection:
     """One anonymous person box from a generic YOLO model.
 
-    The feature deliberately retains only geometry for the current frame.  It
-    neither derives identity/face attributes nor writes image material.
+    Retains geometry for active face/upper-body framing and PTZ tracking.
     """
 
     box: tuple[int, int, int, int]
@@ -30,6 +57,12 @@ class PersonDetection:
     area: int
     center_x: float
     center_y: float
+    face_target_x: float = 0.5
+    face_target_y: float = 0.5
+    cut_top: bool = False
+    cut_bottom: bool = False
+    cut_left: bool = False
+    cut_right: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,7 +108,13 @@ class ComputerScreenDetector:
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return ScreenExtraction(False, None, None, True)
-        detection = Detection((x1, y1, x2, y2), 1.0, (x2 - x1) * (y2 - y1))
+        detection = Detection(
+            (x1, y1, x2, y2),
+            1.0,
+            (x2 - x1) * (y2 - y1),
+            center_x=((x1 + x2) / 2) / frame_width,
+            center_y=((y1 + y2) / 2) / frame_height,
+        )
         return ScreenExtraction(True, crop.copy(), detection, True)
 
     def extract(self, frame: np.ndarray) -> ScreenExtraction:
@@ -93,7 +132,9 @@ class ComputerScreenDetector:
                 verbose=False,
             )[0]
         detections: list[Detection] = []
-        frame_area = frame.shape[0] * frame.shape[1]
+        frame_height, frame_width = frame.shape[:2]
+        frame_area = frame_height * frame_width
+        edge_margin = 15
         for box in result.boxes:
             confidence = float(box.conf[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().tolist())
@@ -103,7 +144,19 @@ class ComputerScreenDetector:
             apparent_ratio = width / max(height, 1)
             if area < frame_area * 0.01 or not 0.40 <= apparent_ratio <= 4.0:
                 continue
-            detections.append(Detection((x1, y1, x2, y2), confidence, area))
+            detections.append(
+                Detection(
+                    (x1, y1, x2, y2),
+                    confidence,
+                    area,
+                    center_x=((x1 + x2) / 2) / frame_width,
+                    center_y=((y1 + y2) / 2) / frame_height,
+                    cut_left=bool(x1 <= edge_margin),
+                    cut_right=bool(x2 >= frame_width - edge_margin),
+                    cut_top=bool(y1 <= edge_margin),
+                    cut_bottom=bool(y2 >= frame_height - edge_margin),
+                )
+            )
         if not detections:
             return ScreenExtraction(False, None, None)
 
@@ -259,6 +312,7 @@ class PersonDetector:
         names = getattr(result, "names", None) or getattr(self.model, "names", None)
         frame_height, frame_width = frame.shape[:2]
         candidates: list[PersonDetection] = []
+        edge_margin = 15
         for box in result.boxes:
             try:
                 class_id = int(float(box.cls[0]))
@@ -275,13 +329,24 @@ class PersonDetector:
             area = (x2 - x1) * (y2 - y1)
             if score < self.confidence or area <= 0:
                 continue
+            height = y2 - y1
+            center_x = ((x1 + x2) / 2) / frame_width
+            center_y = ((y1 + y2) / 2) / frame_height
+            face_px_y = y1 + 0.18 * height
+            face_target_y = max(0.0, min(1.0, face_px_y / frame_height))
             candidates.append(
                 PersonDetection(
                     box=(x1, y1, x2, y2),
                     confidence=score,
                     area=area,
-                    center_x=((x1 + x2) / 2) / frame_width,
-                    center_y=((y1 + y2) / 2) / frame_height,
+                    center_x=center_x,
+                    center_y=center_y,
+                    face_target_x=center_x,
+                    face_target_y=face_target_y,
+                    cut_top=bool(y1 <= edge_margin),
+                    cut_bottom=bool(y2 >= frame_height - edge_margin),
+                    cut_left=bool(x1 <= edge_margin),
+                    cut_right=bool(x2 >= frame_width - edge_margin),
                 )
             )
         if not candidates:

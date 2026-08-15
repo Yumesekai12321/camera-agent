@@ -28,9 +28,11 @@ devices:
       minimum_confidence: 0.45
       confirmation_frames: 2
       absence_rearm_seconds: 3
-      tracking_dead_zone: 0.15
-      tracking_move_duration_seconds: 0.25
-      tracking_move_interval_seconds: 0.5
+      tracking_dead_zone: 0.12
+      tracking_move_duration_seconds: 0.35
+      tracking_move_interval_seconds: 0.3
+      search_move_duration_seconds: 1.2
+      search_move_interval_seconds: 1.2
   monitor_roi: null
   process_interval: 1.0
   rules:
@@ -56,12 +58,12 @@ devices:
     enabled: true
     provider: onvif
     port: 2020
-    # A longer bounded segment keeps ONVIF motion continuous instead of
-    # producing short start/stop jerks between inference cycles.
-    velocity: 0.55
-    move_duration_seconds: 2.0
+    # A smooth velocity with continuous motion chaining keeps ONVIF motion fluid
+    # without start/stop jerks between inference cycles.
+    velocity: 0.45
+    move_duration_seconds: 1.5
   auto_patrol:
     enabled: false
     observe_seconds: 5
-    search_move_interval_seconds: 2.2
+    search_move_interval_seconds: 1.5
     max_alarm_events_per_screen: 3

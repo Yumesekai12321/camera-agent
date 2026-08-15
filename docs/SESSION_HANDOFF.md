@@ -3,7 +3,7 @@
 Đọc file này trước khi bắt đầu một session. Đây là bản tóm tắt vận hành; `AGENTS.md` vẫn là
 quy tắc bắt buộc, còn `README.md` là tài liệu đầy đủ khi cần sửa runtime/provisioning.
 
-## Trạng thái đã xác minh (2026-08-14)
+## Trạng thái đã xác minh (2026-08-15)
 
 - Windows project: `C:\Users\G531\Desktop\Yumesekai\GitHub\camera-agent`.
 - Manifest canonical: `config/devices.yaml`, schema v2, hiện có `yume-1` enabled.
@@ -15,8 +15,9 @@ quy tắc bắt buộc, còn `README.md` là tài liệu đầy đủ khi cần 
   .\.venv\Scripts\python.exe -m tools.check_onvif_ptz --device-id yume-1
   ```
 
-- Regression gate trước rollout Person Guard: `175` unittest PASS, `compileall` PASS; chạy lại
-  `agent.py --check-config` sau khi operator điền UUID/channel Mainflux thật.
+- Regression gate hiện tại: `177` unittest PASS, `compileall` PASS và `agent.py --check-config` PASS.
+- `yume-1` đang bật thử nghiệm `physical_alarm` Tapo với custom audio ID `8196`; kiểm tra target
+  không có `--yes` không phát âm thanh.
 
 ## Central control + Person Guard
 
@@ -25,12 +26,14 @@ quy tắc bắt buộc, còn `README.md` là tài liệu đầy đủ khi cần 
 - `person_guard` cần `yolo11n.pt` local đã verify SHA-256 qua `python -m tools.verify_person_model`.
   Không train/download lúc runtime, không identity/face/frame persistence. Alert: 2 frame; re-arm:
   3 giây không người; alarm outbox-first, còi chỉ opt-in.
-- Mainflux MQTT dùng `channels/<control_channel_id>/messages/camera-agent/...`, MQTT username=Thing
-  ID/password=Thing key, TLS/VPN. Browser token chỉ sessionStorage. Hub desired-state SQLite có
+- Local control dùng desired-state SQLite và command queue. Mainflux MQTT dùng
+  `channels/<control_channel_id>/messages/camera-agent/...` khi deployment đã có control channel;
+  MQTT username=Thing ID/password=Thing key, TLS/VPN. Browser token chỉ sessionStorage. Hub desired-state SQLite có
   generation + ACK/reconnect resend.
-- `mainflux.channel_id` mới làm HTTP publisher dùng `/http/channels/<id>/messages`; `control_channel_id`
-  là channel private controller+agent. `yume-1` chưa có UUID thực trong manifest, nên MQTT/HTTP live
-  rollout vẫn phải chờ operator provision/preflight; không tự đoán hay sửa secret.
+- `mainflux.channel_id` nếu deployment có telemetry channel sẽ làm HTTP publisher dùng
+  `/http/channels/<id>/messages`; `control_channel_id` là channel private controller+agent.
+  Deployment Mainflux hiện tại không có menu Channels và route `/http/messages` đã trả 404, nên
+  telemetry live vẫn phải chờ operator xác nhận adapter path; không tự đoán hay sửa secret.
 
 ## Chạy thử đúng cách
 
@@ -80,16 +83,18 @@ frame lỗi, tuyệt đối không để preview làm chết agent.
 - Auto mặc định trong manifest là `enabled: false`; bật bằng nút `Auto ON` sau khi đã thử manual.
 - Patrol quét theo hàng: `RIGHT ×3 -> DOWN -> LEFT ×3 -> DOWN`, mỗi đoạn khoảng 2.0 giây,
   khoảng chuyển bước 2.2 giây; gặp màn hình thì dừng quan sát 5 giây.
+- Đây là Facebook Monitor patrol. Với Person Guard, Auto chỉ tracking người đã phát hiện và không
+  tự tuần tra để tìm người.
 - Manual move chạy trong PTZ worker riêng; không block inference. `STOP` phải dừng đoạn hiện tại.
 - ONVIF chỉ dùng Camera Account/Profile S đã công bố; không reverse-engineer P2P.
 
 ## Mainflux hiện còn cần operator xác nhận
 
 Runtime hiện đang gửi tới mặc định `/http/messages` và nhận `404` ở deployment hiện tại. Đây là
-lỗi route, không phải token (`401/403` mới là lỗi credential). Mainflux HTTP deployments thường
-cần endpoint có channel, ví dụ `/http/channels/<channel_id>/messages`; code hiện chưa có `channel_id`
-trong manifest. Không sửa bừa secret. Cần xác nhận Mainflux base URL, adapter path, channel ID và
-Thing key env reference trước khi sửa publisher/schema.
+lỗi route, không phải token (`401/403` mới là lỗi credential). Mainflux HTTP deployments có thể dùng
+endpoint có channel, ví dụ `/http/channels/<channel_id>/messages`, nhưng không phải deployment nào
+cũng hiển thị Channels. Không sửa bừa secret. Cần xác nhận Mainflux base URL, adapter path và Thing
+key env reference trước khi sửa publisher/schema.
 
 ## Quy tắc an toàn ngắn gọn
 

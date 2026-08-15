@@ -12,8 +12,32 @@ from camera_agent.ptz import PTZArbiter, PTZController, PTZMove
 from camera_agent.vision import PersonDetection, PersonDetector
 
 
-def detection(*, confidence: float = 0.8, x: float = 0.5, y: float = 0.5, area: int = 100) -> PersonDetection:
-    return PersonDetection((0, 0, 10, 10), confidence, area, x, y)
+def detection(
+    *,
+    confidence: float = 0.8,
+    x: float = 0.5,
+    y: float = 0.5,
+    area: int = 100,
+    face_x: float | None = None,
+    face_y: float | None = None,
+    cut_top: bool = False,
+    cut_bottom: bool = False,
+    cut_left: bool = False,
+    cut_right: bool = False,
+) -> PersonDetection:
+    return PersonDetection(
+        box=(0, 0, 10, 10),
+        confidence=confidence,
+        area=area,
+        center_x=x,
+        center_y=y,
+        face_target_x=x if face_x is None else face_x,
+        face_target_y=y if face_y is None else face_y,
+        cut_top=cut_top,
+        cut_bottom=cut_bottom,
+        cut_left=cut_left,
+        cut_right=cut_right,
+    )
 
 
 class FeatureRuntimeTests(unittest.TestCase):
@@ -72,9 +96,44 @@ class PersonGuardTests(unittest.TestCase):
         self.assertEqual(guard.next_tracking_move(target, auto_enabled=True), PTZMove.RIGHT)
         self.assertIsNone(guard.next_tracking_move(target, auto_enabled=True))
         now[0] = 0.5
-        vertical = detection(x=0.6, y=0.1)
-        self.assertEqual(guard.next_tracking_move(vertical, auto_enabled=True), PTZMove.UP)
+        vertical = detection(x=0.5, y=0.8, face_y=0.7)
+        self.assertEqual(guard.next_tracking_move(vertical, auto_enabled=True), PTZMove.DOWN)
         self.assertIsNone(guard.next_tracking_move(vertical, auto_enabled=False))
+
+    def test_tracking_prioritizes_top_cutoff_for_face_capture(self):
+        now = [0.0]
+        guard = PersonGuard(
+            PersonGuardConfig(confirmation_frames=1, tracking_move_interval_seconds=0.5),
+            clock=lambda: now[0],
+        )
+        cut_top_target = detection(x=0.5, y=0.5, cut_top=True)
+        guard.observe(cut_top_target)
+        self.assertEqual(guard.next_tracking_move(cut_top_target, auto_enabled=True), PTZMove.UP)
+
+    def test_search_move_when_person_absent(self):
+        now = [0.0]
+        guard = PersonGuard(
+            PersonGuardConfig(confirmation_frames=1, search_move_interval_seconds=2.0),
+            clock=lambda: now[0],
+        )
+
+        # When auto is False, no search move
+        self.assertFalse(guard.should_search_move(auto_enabled=False))
+
+        # When auto is True and no person present, search move fires
+        self.assertTrue(guard.should_search_move(auto_enabled=True))
+
+        # Too soon for next search move
+        now[0] = 1.0
+        self.assertFalse(guard.should_search_move(auto_enabled=True))
+
+        # After interval elapsed
+        now[0] = 2.1
+        self.assertTrue(guard.should_search_move(auto_enabled=True))
+
+        # When person becomes present, search move stops
+        guard.observe(detection())
+        self.assertFalse(guard.should_search_move(auto_enabled=True))
 
 
 class _Scalar:

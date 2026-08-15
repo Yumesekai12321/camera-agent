@@ -102,9 +102,10 @@ class PTZArbiter:
         if not owner:
             raise PTZError("PTZ owner is required")
         with self._lock:
-            # Stop before changing ownership even when the underlying adapter
-            # still believes a previous non-blocking segment is in flight.
-            if self._owner is not None:
+            # If changing ownership between features, stop previous motion first.
+            # If the same owner continues moving, pass the command to the controller
+            # for smooth continuous transition.
+            if self._owner is not None and self._owner != owner:
                 self.controller.stop()
             self.controller.start(direction, duration_seconds=duration_seconds)
             self._owner = owner
@@ -134,6 +135,9 @@ class OnvifPTZ(PTZController):
     _motion_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _motion_cancel: threading.Event | None = field(default=None, init=False, repr=False)
+    _active_direction: PTZMove | None = field(default=None, init=False, repr=False)
+    _active_deadline: float = field(default=0.0, init=False, repr=False)
+    _motion_wake: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -240,31 +244,14 @@ class OnvifPTZ(PTZController):
             await close()
         return token
 
-    async def _async_move(
-        self,
-        direction: PTZMove,
-        duration: float,
-        cancel_event: threading.Event | None = None,
-    ) -> None:
+    async def _async_continuous_move(self, velocity: dict[str, Any]) -> None:
         client, service, token = await self._async_connect()
-        raw_x, raw_y = _VELOCITIES[direction]
-        velocity = {"PanTilt": {"x": raw_x * self.velocity, "y": raw_y * self.velocity}}
         try:
             await service.ContinuousMove({"ProfileToken": token, "Velocity": velocity})
-            # Poll a threading.Event so STOP can interrupt a long, smooth move
-            # without waiting for the configured segment duration to elapse.
-            elapsed = 0.0
-            while elapsed < duration and not (cancel_event and cancel_event.is_set()):
-                step = min(0.05, duration - elapsed)
-                await asyncio.sleep(step)
-                elapsed += step
         finally:
-            try:
-                await service.Stop({"ProfileToken": token, "PanTilt": True, "Zoom": True})
-            finally:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    await close()
+            close = getattr(client, "close", None)
+            if callable(close):
+                await close()
 
     async def _async_stop(self) -> None:
         client, service, token = await self._async_connect()
@@ -275,118 +262,23 @@ class OnvifPTZ(PTZController):
             if callable(close):
                 await close()
 
-    def move(self, direction: PTZMove, *, duration_seconds: float | None = None) -> None:
-        if not isinstance(direction, PTZMove):
-            raise PTZError("unsupported PTZ direction")
-        duration = self.move_duration_seconds if duration_seconds is None else duration_seconds
-        if not 0.1 <= duration <= 5:
-            raise PTZError("ONVIF PTZ move duration must be between 0.1 and 5")
+    def _execute_continuous_move(self, direction: PTZMove) -> None:
         raw_x, raw_y = _VELOCITIES[direction]
         velocity = {"PanTilt": {"x": raw_x * self.velocity, "y": raw_y * self.velocity}}
         with self._lock:
             if self._uses_async_client():
-                try:
-                    asyncio.run(self._async_move(direction, duration))
-                except Exception as exc:
-                    raise PTZError(f"ONVIF PTZ move failed: {type(exc).__name__}") from exc
+                asyncio.run(self._async_continuous_move(velocity))
                 return
             service, token = self._connect_locked()
-            try:
-                _resolve_onvif(service.ContinuousMove({"ProfileToken": token, "Velocity": velocity}))
-                time.sleep(duration)
-            except Exception as exc:
-                self._service = None
-                self._profile_token = None
-                raise PTZError(f"ONVIF PTZ move failed: {type(exc).__name__}") from exc
-            finally:
-                try:
-                    _resolve_onvif(service.Stop({"ProfileToken": token, "PanTilt": True, "Zoom": True}))
-                except Exception as exc:
-                    LOGGER.error("ONVIF PTZ stop failed: %s", type(exc).__name__)
+            _resolve_onvif(service.ContinuousMove({"ProfileToken": token, "Velocity": velocity}))
 
-    def _move_worker(
-        self,
-        direction: PTZMove,
-        duration: float,
-        cancel_event: threading.Event,
-    ) -> None:
-        try:
-            raw_x, raw_y = _VELOCITIES[direction]
-            velocity = {"PanTilt": {"x": raw_x * self.velocity, "y": raw_y * self.velocity}}
-            with self._lock:
-                if self._uses_async_client():
-                    try:
-                        asyncio.run(self._async_move(direction, duration, cancel_event))
-                    except Exception as exc:
-                        raise PTZError(f"ONVIF PTZ move failed: {type(exc).__name__}") from exc
-                    return
-                service, token = self._connect_locked()
-                try:
-                    LOGGER.debug("ONVIF PTZ ContinuousMove issued")
-                    _resolve_onvif(service.ContinuousMove({"ProfileToken": token, "Velocity": velocity}))
-                    deadline = time.monotonic() + duration
-                    while time.monotonic() < deadline and not cancel_event.is_set():
-                        cancel_event.wait(min(0.05, max(0.0, deadline - time.monotonic())))
-                finally:
-                    try:
-                        _resolve_onvif(service.Stop({"ProfileToken": token, "PanTilt": True, "Zoom": True}))
-                    except Exception as exc:
-                        LOGGER.error("ONVIF PTZ stop failed: %s", type(exc).__name__)
-        except PTZError as exc:
-            LOGGER.error("ONVIF PTZ background move failed: %s", exc)
-        except Exception as exc:
-            LOGGER.error("ONVIF PTZ background move failed: %s", type(exc).__name__)
-        finally:
-            with self._motion_guard:
-                if self._motion_thread is threading.current_thread():
-                    self._motion_thread = None
-                    self._motion_cancel = None
-
-    def start(self, direction: PTZMove, *, duration_seconds: float | None = None) -> None:
-        if not isinstance(direction, PTZMove):
-            raise PTZError("unsupported PTZ direction")
-        duration = self.move_duration_seconds if duration_seconds is None else duration_seconds
-        if not 0.1 <= duration <= 5:
-            raise PTZError("ONVIF PTZ move duration must be between 0.1 and 5")
-        with self._motion_guard:
-            old_thread = self._motion_thread
-            old_cancel = self._motion_cancel
-            if old_cancel is not None:
-                old_cancel.set()
-        if old_thread is not None and old_thread is not threading.current_thread():
-            old_thread.join(timeout=2.0)
-            if old_thread.is_alive():
-                raise PTZError("previous ONVIF PTZ move did not stop")
-        cancel_event = threading.Event()
-        thread = threading.Thread(
-            target=self._move_worker,
-            args=(direction, duration, cancel_event),
-            name="onvif-ptz-motion",
-            daemon=True,
-        )
-        with self._motion_guard:
-            self._motion_cancel = cancel_event
-            self._motion_thread = thread
-        LOGGER.info("ONVIF PTZ move started: %s for %.1fs", direction.value, duration)
-        thread.start()
-
-    def stop(self) -> None:
-        with self._motion_guard:
-            motion_thread = self._motion_thread
-            cancel_event = self._motion_cancel
-            if cancel_event is not None:
-                cancel_event.set()
-        if motion_thread is not None and motion_thread is not threading.current_thread():
-            motion_thread.join(timeout=2.0)
-            if motion_thread.is_alive():
-                raise PTZError("ONVIF PTZ move did not stop")
-            return
+    def _execute_stop(self) -> None:
         with self._lock:
             if self._uses_async_client():
                 try:
                     asyncio.run(self._async_stop())
                 except Exception as exc:
-                    raise PTZError(f"ONVIF PTZ stop failed: {type(exc).__name__}") from exc
+                    LOGGER.error("ONVIF async PTZ stop failed: %s", type(exc).__name__)
                 return
             try:
                 service, token = self._connect_locked()
@@ -397,3 +289,114 @@ class OnvifPTZ(PTZController):
                 self._service = None
                 self._profile_token = None
                 raise PTZError(f"ONVIF PTZ stop failed: {type(exc).__name__}") from exc
+
+    def move(self, direction: PTZMove, *, duration_seconds: float | None = None) -> None:
+        if not isinstance(direction, PTZMove):
+            raise PTZError("unsupported PTZ direction")
+        duration = self.move_duration_seconds if duration_seconds is None else duration_seconds
+        if not 0.1 <= duration <= 5:
+            raise PTZError("ONVIF PTZ move duration must be between 0.1 and 5")
+        try:
+            self._execute_continuous_move(direction)
+            time.sleep(duration)
+        finally:
+            self._execute_stop()
+
+    def _continuous_worker(self, cancel_event: threading.Event) -> None:
+        last_sent_direction: PTZMove | None = None
+        try:
+            while not cancel_event.is_set():
+                with self._motion_guard:
+                    target_direction = self._active_direction
+                    deadline = self._active_deadline
+
+                now = time.monotonic()
+                if target_direction is None or now >= deadline:
+                    break
+
+                if target_direction != last_sent_direction:
+                    self._execute_continuous_move(target_direction)
+                    last_sent_direction = target_direction
+
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    break
+
+                self._motion_wake.clear()
+                self._motion_wake.wait(timeout=min(0.05, remaining))
+        except PTZError as exc:
+            LOGGER.error("ONVIF PTZ background move failed: %s", exc)
+        except Exception as exc:
+            LOGGER.error("ONVIF PTZ background move failed: %s", type(exc).__name__)
+        finally:
+            try:
+                self._execute_stop()
+            except Exception as exc:
+                LOGGER.error("ONVIF PTZ stop failed in worker: %s", type(exc).__name__)
+            with self._motion_guard:
+                if self._motion_thread is threading.current_thread():
+                    self._motion_thread = None
+                    self._motion_cancel = None
+                    self._active_direction = None
+                    self._active_deadline = 0.0
+
+    def start(self, direction: PTZMove, *, duration_seconds: float | None = None) -> None:
+        if not isinstance(direction, PTZMove):
+            raise PTZError("unsupported PTZ direction")
+        duration = self.move_duration_seconds if duration_seconds is None else duration_seconds
+        if not 0.1 <= duration <= 5:
+            raise PTZError("ONVIF PTZ move duration must be between 0.1 and 5")
+
+        now = time.monotonic()
+        new_deadline = now + duration
+
+        with self._motion_guard:
+            if self._motion_thread is not None and self._motion_thread.is_alive():
+                if self._active_direction == direction:
+                    # Seamless extension of current continuous movement
+                    self._active_deadline = max(self._active_deadline, new_deadline)
+                    self._motion_wake.set()
+                    LOGGER.debug("ONVIF PTZ extended continuous move: %s until %.2fs", direction.value, duration)
+                    return
+                # Seamless velocity direction transition in-flight
+                self._active_direction = direction
+                self._active_deadline = new_deadline
+                self._motion_wake.set()
+                LOGGER.info("ONVIF PTZ transition continuous move: %s for %.1fs", direction.value, duration)
+                return
+
+            cancel_event = threading.Event()
+            self._motion_cancel = cancel_event
+            self._active_direction = direction
+            self._active_deadline = new_deadline
+            self._motion_wake.clear()
+            thread = threading.Thread(
+                target=self._continuous_worker,
+                args=(cancel_event,),
+                name="onvif-ptz-motion",
+                daemon=True,
+            )
+            self._motion_thread = thread
+            LOGGER.info("ONVIF PTZ move started: %s for %.1fs", direction.value, duration)
+            thread.start()
+
+    def stop(self) -> None:
+        with self._motion_guard:
+            self._active_direction = None
+            self._active_deadline = 0.0
+            motion_thread = self._motion_thread
+            cancel_event = self._motion_cancel
+            if cancel_event is not None:
+                cancel_event.set()
+            self._motion_wake.set()
+
+        if motion_thread is not None and motion_thread is not threading.current_thread():
+            motion_thread.join(timeout=2.0)
+            if motion_thread.is_alive():
+                raise PTZError("ONVIF PTZ move did not stop")
+            return
+
+        try:
+            self._execute_stop()
+        except Exception as exc:
+            LOGGER.error("ONVIF PTZ stop failed: %s", type(exc).__name__)
