@@ -12,3 +12,4 @@ pywin32>=310,<400
 torch>=2.6,<3
 torchvision>=0.21,<1
 ultralytics>=8.3,<9
+pytest>=8,<9

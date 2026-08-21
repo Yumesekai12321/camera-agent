@@ -14,5 +14,9 @@ data/**/*.sqlite3
 models/*.pt
 models/training/
 data/**/unresolved/
+data/cve_cache/
+data/cyber.sqlite3
+data/cyber-outbox.sqlite3
+logs/
 data/**/review/
 *.onnx

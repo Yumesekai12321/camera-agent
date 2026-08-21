@@ -922,3 +922,18 @@ Nếu cần rebuild executable sau khi sửa `tools/monitor.py`:
 .\.venv\Scripts\python.exe -m pip install pyinstaller
 .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm CameraAgentMonitor.spec
 ```
+
+## Cyber Agent defensive extension
+
+Repo có thêm pipeline cyber độc lập, chỉ dành cho lab/thiết bị được ủy quyền: allowlist scope → discovery bounded → fingerprint read-only → NVD/CISA cache → safe validation → risk score → SenML/outbox/Mainflux. Không có exploit, brute-force, reverse shell, persistence, lateral movement hay payload.
+
+Tài liệu chi tiết: [kiến trúc](docs/CYBER_AGENT_ARCHITECTURE.md), [thiết lập](docs/CYBER_AGENT_SETUP.md), [chính sách an toàn](docs/CYBER_AGENT_SECURITY.md). CLI:
+
+```powershell
+.\.venv\Scripts\python.exe -m camera_agent.cyber.cli discover
+.\.venv\Scripts\python.exe -m camera_agent.cyber.cli scan --target 192.168.56.20
+.\.venv\Scripts\python.exe -m camera_agent.cyber.cli audit --target 192.168.56.20
+.\.venv\Scripts\python.exe -m camera_agent.cyber.cli run --dry-run
+```
+
+Bridge với camera runtime chỉ bật khi đặt `CYBER_AGENT_ENABLED=true`; mặc định behavior cũ không đổi. `config/cyber_agent.yaml` và `config/cyber_agent_lab.yaml` đều deny public IP, tắt remote vulnerability feed và cấm mọi validation destructive.

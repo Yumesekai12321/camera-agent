@@ -13,6 +13,7 @@ from camera_agent.config import ConfigurationError, PROJECT_DIR, Settings
 from camera_agent.fleet import FleetAgent
 from camera_agent.fleet_config import FleetConfig
 from camera_agent.rules import RuleConfigurationError, RulesConfig
+from camera_agent.cyber.integration import CyberRuntimeBridge
 
 
 def resolve_devices_path(
@@ -155,7 +156,16 @@ def main() -> int:
                 preview=args.preview_mode != "off",
                 preview_mode=args.preview_mode,
             )
-        CameraAgent(settings, dry_run=args.dry_run).run(max_cycles=args.max_cycles)
+        cyber_bridge = CyberRuntimeBridge.from_environment()
+        try:
+            CameraAgent(
+                settings,
+                dry_run=args.dry_run,
+                status_callback=cyber_bridge.submit if cyber_bridge is not None else None,
+            ).run(max_cycles=args.max_cycles)
+        finally:
+            if cyber_bridge is not None:
+                cyber_bridge.close()
         return 0
     except (ConfigurationError, RuleConfigurationError, FileNotFoundError) as exc:
         logging.error("%s", exc)

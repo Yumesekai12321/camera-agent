@@ -21,6 +21,7 @@ from .ptz import NoopPTZ, OnvifPTZ, PTZController
 from .pentest import PentestStatus
 from .pentest_agent import PentestAgent, PentestSnapshot
 from .vision import ComputerScreenDetector, FacebookClassifier, PersonDetector
+from .cyber.integration import CyberRuntimeBridge
 
 
 LOGGER = logging.getLogger(__name__)
@@ -231,6 +232,7 @@ class FleetAgent:
         self.config = config
         self.stop_event = threading.Event()
         self.board = FleetStatusBoard(config.devices)
+        self.cyber_bridge = CyberRuntimeBridge.from_environment()
         inference_lock = threading.Lock()
         camera_devices = tuple(device for device in config.devices if device.agent_type == "camera")
         self.classifier = None
@@ -369,7 +371,7 @@ class FleetAgent:
                     command_store=command_store,
                     control_ack_callback=(control_transport.publish_ack if control_transport is not None else None),
                     control_transport=control_transport,
-                    status_callback=self.board.update,
+                    status_callback=self._camera_status,
                     stop_event=self.stop_event,
                 )
             )
@@ -380,6 +382,11 @@ class FleetAgent:
         except Exception as exc:  # Keep other cameras alive if one worker crashes.
             LOGGER.exception("[%s] Camera worker crashed", agent.device_id)
             self.board.fail(agent.device_id, str(exc) or type(exc).__name__)
+
+    def _camera_status(self, snapshot: AgentSnapshot) -> None:
+        self.board.update(snapshot)
+        if self.cyber_bridge is not None:
+            self.cyber_bridge.submit(snapshot)
 
     def run(self, *, max_cycles: int | None = None) -> None:
         LOGGER.info(
@@ -415,4 +422,6 @@ class FleetAgent:
                 thread.join(timeout=12)
             if self.config.preview:
                 cv2.destroyAllWindows()
+            if self.cyber_bridge is not None:
+                self.cyber_bridge.close()
             LOGGER.info("Fleet stopped")

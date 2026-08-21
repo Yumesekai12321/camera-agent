@@ -1,0 +1,64 @@
+enabled: true
+mode: safe
+
+# Chỉ dùng trong lab do operator sở hữu/ủy quyền.
+scope:
+  allowed_subnets: ["192.168.56.0/24"]
+  allowed_hosts: ["192.168.56.20", "192.168.56.21"]
+  denied_hosts: []
+  deny_public_ips: true
+
+discovery:
+  enabled: true
+  methods: [icmp, arp, mdns, ssdp]
+  timeout_seconds: 1.5
+  max_hosts_per_minute: 30
+  max_concurrency: 4
+  max_hosts: 128
+  fallback_ports: [22, 80, 443, 554, 1883, 8080]
+
+fingerprint:
+  enabled: true
+  ports: [21, 22, 23, 53, 80, 443, 554, 1883, 8080, 8443]
+  connect_timeout_seconds: 1.5
+  banner_timeout_seconds: 1.5
+  max_connections_per_minute: 120
+
+vulnerability:
+  enabled: true
+  sources: [nvd, cisa_kev]
+  cache_ttl_hours: 24
+  cache_dir: data/cve_cache
+  allow_remote_sources: false
+  max_remote_requests_per_minute: 30
+
+validation:
+  enabled: true
+  allow_safe_http_probe: true
+  allow_tls_probe: true
+  allow_banner_probe: true
+  allow_unauthenticated_endpoint_check: true
+  allow_default_config_check: true
+  paths: [/, /health, /status, /admin]
+  max_requests_per_minute: 120
+  allow_exploit: false
+  allow_bruteforce: false
+  allow_password_spray: false
+
+risk:
+  weights: {cvss: 0.4, exploitability: 0.2, exposure: 0.2, asset_value: 0.2}
+
+mainflux:
+  enabled: true
+  base_url: "http://localhost"
+  http_adapter_url: "http://localhost:8185"
+  token_env: MAINFLUX_TOKEN
+  thing_id_env: MAINFLUX_THING_ID
+  channel_id_env: MAINFLUX_CHANNEL_ID
+  timeout_seconds: 5
+  retry_backoff_seconds: 5
+  messages_path: /http/messages
+
+logging:
+  json_logs: true
+  file: logs/cyber_agent.jsonl

@@ -8,7 +8,7 @@ devices:
   agent_type: camera
   source_type: rtsp
   source:
-    host: 172.16.7.62
+    host: 192.168.0.104
     port: 554
     username_env: CAMERA_AGENT_YUME_1_RTSP_USER
     password_env: CAMERA_AGENT_YUME_1_RTSP_PASS
@@ -16,9 +16,8 @@ devices:
     path: stream1
   mainflux:
     thing_id: f1a0b8e9-4c7d-444b-83e2-ff484a9ebfdc
+    thing_name: camera-agent-yume-1
     thing_key_env: CAMERA_AGENT_YUME_1_MAINFLUX_THING_KEY
-  # Add the provisioned non-secret Thing UUID here before enabling remote MQTT
-  # control. Keep its key only in CAMERA_AGENT_YUME_1_MAINFLUX_THING_KEY.
   features:
     available: [facebook_monitor, person_guard]
     default: facebook_monitor
@@ -37,17 +36,11 @@ devices:
   process_interval: 1.0
   rules:
     template: default
-    # Conservative local alarm gate for this camera.  The classifier still
-    # reports raw scores, but a transient VS Code-like false positive must not
-    # create a Facebook event or activate the physical alarm.
     overrides:
       facebook_usage:
         minimum_confidence: 0.82
         trigger_after_seconds: 2
         cooldown_seconds: 3
-  # Opt in to the C200's custom audio only for confirmed local events.
-  # It reuses the RTSP Camera Account references above; no secret is stored
-  # in this manifest.
   physical_alarm:
     enabled: true
     provider: tapo
@@ -58,8 +51,6 @@ devices:
     enabled: true
     provider: onvif
     port: 2020
-    # A smooth velocity with continuous motion chaining keeps ONVIF motion fluid
-    # without start/stop jerks between inference cycles.
     velocity: 0.45
     move_duration_seconds: 1.5
   auto_patrol:

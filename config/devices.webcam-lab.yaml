@@ -1,0 +1,161 @@
+version: 2
+
+fleet:
+  preview: true
+
+# Generic examples. YAML stores identifiers and environment-variable names, never
+# passwords, credential-bearing URLs or Mainflux Thing keys.
+devices:
+  - device_id: rtsp-lobby-01
+    display_name: Lobby RTSP camera
+    enabled: false
+    source_type: rtsp
+    source:
+      adapter: generic
+      host: 192.0.2.10
+      port: 554
+      path: Streaming/Channels/101
+      username_env: CAMERA_AGENT_RTSP_LOBBY_01_RTSP_USER
+      password_env: CAMERA_AGENT_RTSP_LOBBY_01_RTSP_PASS
+    mainflux:
+      thing_name: camera-agent-rtsp-lobby-01
+      thing_key_env: CAMERA_AGENT_RTSP_LOBBY_01_MAINFLUX_THING_KEY
+    monitor_roi: [0.10, 0.15, 0.70, 0.65]
+    process_interval: 1.5
+    rules:
+      template: default
+      overrides: {}
+
+  # Tapo is an onboarding preset over the same generic RTSP runtime.
+  - device_id: tapo-example-01
+    display_name: Tapo RTSP adapter example
+    enabled: false
+    source_type: rtsp
+    source:
+      adapter: tapo
+      host: 192.0.2.11
+      port: 554
+      path: stream1
+      username_env: CAMERA_AGENT_TAPO_EXAMPLE_01_RTSP_USER
+      password_env: CAMERA_AGENT_TAPO_EXAMPLE_01_RTSP_PASS
+    mainflux:
+      thing_name: camera-agent-tapo-example-01
+      thing_key_env: CAMERA_AGENT_TAPO_EXAMPLE_01_MAINFLUX_THING_KEY
+    # Person Guard runs only a verified operator-installed local model. It
+    # never downloads a model during runtime and it does not identify people.
+    features:
+      available: [facebook_monitor, person_guard]
+      default: facebook_monitor
+      person_guard:
+        model_path_env: CAMERA_AGENT_TAPO_EXAMPLE_01_PERSON_MODEL
+        model_sha256_env: CAMERA_AGENT_TAPO_EXAMPLE_01_PERSON_MODEL_SHA256
+    # Experimental: uses the Tapo local camera API through optional pytapo.
+    # It is off by default because some C200 firmware builds reject manual siren control.
+    physical_alarm:
+      enabled: false
+      provider: tapo
+      duration_seconds: 3
+      cooldown_seconds: 30
+    # ONVIF PTZ reuses the structured RTSP Camera Account. It remains disabled
+    # until tools.check_onvif_ptz succeeds on the same trusted LAN.
+    ptz:
+      enabled: false
+      provider: onvif
+      port: 2020
+      velocity: 0.35
+      move_duration_seconds: 0.7
+    auto_patrol:
+      enabled: false
+      observe_seconds: 5
+      search_move_interval_seconds: 1
+      max_alarm_events_per_screen: 3
+    process_interval: 1.5
+    rules:
+      template: default
+      overrides: {}
+
+  - device_id: android-display-01
+    display_name: Android display source
+    enabled: false
+    source_type: adb
+    source:
+      fps: 1.0
+      command_timeout: 6
+      require_landscape: true
+      minimum_frame_std: 2.0
+      # serial_env: CAMERA_AGENT_ANDROID_DISPLAY_01_ADB_SERIAL
+    mainflux:
+      thing_name: camera-agent-android-display-01
+      thing_key_env: CAMERA_AGENT_ANDROID_DISPLAY_01_MAINFLUX_THING_KEY
+    process_interval: 2.0
+    rules:
+      template: default
+      overrides: {}
+
+  - device_id: scrcpy-window-01
+    display_name: Named scrcpy window source
+    enabled: false
+    source_type: window
+    source:
+      title: CAMERA-LIVE
+      capture_method: auto
+      fps: 8.0
+      minimum_frame_std: 2.0
+    mainflux:
+      thing_name: camera-agent-scrcpy-window-01
+      thing_key_env: CAMERA_AGENT_SCRCPY_WINDOW_01_MAINFLUX_THING_KEY
+    process_interval: 1.5
+    rules:
+      template: default
+      overrides: {}
+
+  - device_id: webcam-01
+    display_name: Physical or virtual webcam
+    enabled: true
+    source_type: webcam
+    source:
+      index: 0
+      backend: dshow
+      width: 1280
+      height: 720
+    mainflux:
+      thing_name: camera-agent-webcam-01
+      thing_key_env: CAMERA_AGENT_WEBCAM_01_MAINFLUX_THING_KEY
+    process_interval: 1.5
+    rules:
+      template: default
+      overrides: {}
+
+  # Tapo-backed bounded security assessment. The Windows host runs the checks;
+  # the camera is the source/device identity. target_from_source assesses the
+  # Tapo host itself, using only the explicitly listed ports.
+  - device_id: tapo-security-agent-01
+    display_name: Tapo C200 security assessment agent
+    enabled: false
+    agent_type: pentest
+    source_type: rtsp
+    source:
+      adapter: tapo
+      host: 192.0.2.12
+      port: 554
+      path: stream1
+      username_env: CAMERA_AGENT_TAPO_SECURITY_AGENT_01_RTSP_USER
+      password_env: CAMERA_AGENT_TAPO_SECURITY_AGENT_01_RTSP_PASS
+    pentest:
+      target_from_source: true
+      ports: [554]
+      connect_timeout: 3
+      request_timeout: 5
+      verify_tls: true
+      allow_public_target: false
+      rtsp_probe: true
+      # For an approved HTTPS target, replace target_from_source with target_host,
+      # include port 443, then configure http_scheme: https,
+      # http_options_probe: true and tls_assessment: true.
+    mainflux:
+      thing_name: camera-agent-tapo-security-agent-01
+      thing_key_env: CAMERA_AGENT_TAPO_SECURITY_AGENT_01_MAINFLUX_THING_KEY
+    process_interval: 300
+    rules:
+      template: default
+      overrides: {}
